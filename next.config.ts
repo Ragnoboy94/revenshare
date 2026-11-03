@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Demo host serves /slug/ → public/demos/slug/index.html; don't strip slash before rewrite
+  // Demo host URLs keep trailing slash (/slug/) for proxy paths
   skipTrailingSlashRedirect: true,
   // Dev через tuna / ngrok: иначе /_next и HMR с чужого Origin тормозят или рвутся
   allowedDevOrigins: [
