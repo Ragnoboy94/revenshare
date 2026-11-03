@@ -1,17 +1,24 @@
-# ReverShare — design series v2
+# RevenShare
 
-Копия [revshare](../revshare) для **новой серии дизайна**. Логика, админка, демо, docs — те же; визуал пересобираем здесь, чтобы сравнивать две версии рядом.
+Лендинг и админка заявок. Сайт: [revenshare.ru](https://revenshare.ru)
 
-| Серия | Папка | Порт |
-|-------|--------|------|
-| v1 (текущий) | `../revshare` | **3040** |
-| v2 (дизайн) | эта | **3041** |
+## Локально
+
+Node.js 20+. Скопируй `.env.example` → `.env.local`, задай `ADMIN_PATH` и `ADMIN_PASSWORD`.
 
 ```bash
 npm install
 npm run dev
 ```
 
-Открыть: [http://localhost:3041](http://localhost:3041)
+http://localhost:3041 · админка: `/a/<ADMIN_PATH>`
 
-Админка: `/a/<ADMIN_PATH>` из `.env.local` (путь другой, чем у v1 — cookie не пересекаются).
+## Прод
+
+```bash
+npm ci
+npm run build
+npm start
+```
+
+Секреты только в `.env.local` на сервере. В репозитории — код сайта и админки, без договоров и демо-проектов.
