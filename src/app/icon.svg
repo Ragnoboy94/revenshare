@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="RevShare">
+  <!-- Pale waves behind -->
+  <g fill="none" stroke="#0d7377" stroke-linecap="round">
+    <path d="M10.2 8.2c-1.85 2.35-1.85 13.25 0 15.6" stroke-width="1.45" opacity="0.38"/>
+    <path d="M6.4 5.6c-2.7 3.35-2.7 17.45 0 20.8" stroke-width="1.35" opacity="0.28"/>
+    <path d="M2.9 3.4c-3.2 4-3.2 21.2 0 25.2" stroke-width="1.2" opacity="0.18"/>
+    <path d="M21.8 8.2c1.85 2.35 1.85 13.25 0 15.6" stroke-width="1.45" opacity="0.38"/>
+    <path d="M25.6 5.6c2.7 3.35 2.7 17.45 0 20.8" stroke-width="1.35" opacity="0.28"/>
+    <path d="M29.1 3.4c3.2 4 3.2 21.2 0 25.2" stroke-width="1.2" opacity="0.18"/>
+  </g>
+  <!-- RS on top, larger -->
+  <text
+    x="16"
+    y="16.7"
+    text-anchor="middle"
+    dominant-baseline="central"
+    fill="#0d7377"
+    font-family="ui-sans-serif, system-ui, Segoe UI, Helvetica, Arial, sans-serif"
+    font-size="14.5"
+    font-weight="750"
+    letter-spacing="-1"
+  >RS</text>
+</svg>

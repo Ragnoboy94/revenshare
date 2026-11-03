@@ -1,0 +1,57 @@
+.root {
+  position: relative;
+  display: inline-block;
+  font-family: var(--font-display);
+  font-size: clamp(2.6rem, 8vw, 5.2rem);
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  line-height: 0.95;
+  color: var(--ink);
+  margin: 0;
+}
+
+.measure {
+  visibility: hidden;
+  display: block;
+  pointer-events: none;
+  user-select: none;
+}
+
+.live {
+  position: absolute;
+  inset: 0 auto auto 0;
+  display: inline-flex;
+  align-items: baseline;
+  white-space: nowrap;
+}
+
+.half {
+  display: inline-block;
+}
+
+.caret {
+  display: inline-block;
+  width: 0.08em;
+  height: 0.85em;
+  margin-left: 0.06em;
+  background: var(--accent);
+  transform: translateY(0.08em);
+  animation: blink 900ms steps(1) infinite;
+}
+
+@keyframes blink {
+  0%,
+  45% {
+    opacity: 1;
+  }
+  46%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .caret {
+    display: none;
+  }
+}

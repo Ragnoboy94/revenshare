@@ -1,0 +1,87 @@
+.section {
+  padding: clamp(3rem, 8vh, 5rem) 0;
+  border-top: 1px solid var(--line);
+}
+
+.inner {
+  max-width: var(--max);
+  margin: 0 auto;
+  padding: 0 var(--space);
+}
+
+.eyebrow {
+  font-size: 0.8rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent-deep);
+  margin-bottom: 0.5rem;
+  font-weight: 650;
+}
+
+.inner > h2 {
+  font-size: clamp(1.6rem, 3vw, 2.1rem);
+  margin-bottom: 0.5rem;
+}
+
+.sub {
+  max-width: 40rem;
+  color: var(--ink-muted);
+  margin-bottom: 2rem;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2rem;
+  margin-bottom: 2.5rem;
+}
+
+.grid h3 {
+  font-size: 1.1rem;
+  margin-bottom: 0.85rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.grid ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.grid li {
+  padding-left: 1rem;
+  border-left: 2px solid var(--accent);
+  color: var(--ink-muted);
+}
+
+.grid > div:last-child li {
+  border-left-color: var(--warm);
+}
+
+.why {
+  padding: 1.5rem 0 0;
+  border-top: 1px solid var(--line);
+}
+
+.why h3 {
+  font-size: 1.15rem;
+  margin-bottom: 0.85rem;
+}
+
+.why ul {
+  margin: 0;
+  padding-left: 1.15rem;
+  color: var(--ink-muted);
+  display: grid;
+  gap: 0.4rem;
+}
+
+@media (max-width: 720px) {
+  .grid {
+    grid-template-columns: 1fr;
+    gap: 1.75rem;
+  }
+}

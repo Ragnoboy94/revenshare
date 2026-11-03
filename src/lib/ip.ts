@@ -1,0 +1,16 @@
+export const IP = {
+  brand: "RevenShare",
+  fullName: "ИП Махнев Сергей Александрович",
+  shortName: "Махнев С. А.",
+  inn: "381713335890",
+  ogrnip: "324385000037216",
+  city: "г. Иркутск",
+  region: "Иркутская область",
+  okved: "62.01",
+  okvedName: "Разработка компьютерного программного обеспечения",
+  tax: "УСН",
+  email: "info@revenshare.ru",
+  siteUrl: process.env.NEXT_PUBLIC_SITE_URL ?? "https://revenshare.ru",
+  caseUrl: "https://navicert.pro",
+  caseName: "navicert.pro",
+} as const;
