@@ -1,6 +1,6 @@
-import { spawn, type ChildProcess } from "child_process";
+import { execFile } from "child_process";
 import { existsSync } from "fs";
-import { mkdir, readFile, writeFile } from "fs/promises";
+import { readFile } from "fs/promises";
 import net from "net";
 import path from "path";
 import {
@@ -23,91 +23,122 @@ export type DemoRuntime = {
   url: string;
 };
 
-type PersistedRow = {
-  slug: string;
-  port: number;
-  pid: number;
-  startedAt: string;
-};
-
-type LiveProc = {
-  child: ChildProcess;
-  port: number;
-  startedAt: string;
-  status: DemoStatus;
-  error: string | null;
+type Pm2Proc = {
+  name?: string;
+  pid?: number;
+  pm2_env?: {
+    status?: string;
+    pm_uptime?: number;
+    PORT?: string | number;
+    pm_err_log_path?: string;
+    env?: { PORT?: string | number };
+  };
 };
 
 const PORT_MIN = 4100;
 const PORT_MAX = 4199;
-const STATE_FILE = path.join(process.cwd(), "data", "demo-runtime.json");
 
-const live = new Map<string, LiveProc>();
-let hydrated = false;
-
-function isPidAlive(pid: number): boolean {
-  if (!pid || pid < 1) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+function pm2Bin(): string {
+  return process.platform === "win32" ? "pm2.cmd" : "pm2";
 }
 
-async function ensureDataDir() {
-  await mkdir(path.dirname(STATE_FILE), { recursive: true });
+function pm2Path(): string {
+  const current = process.env.PATH ? process.env.PATH.split(path.delimiter) : [];
+  const extra =
+    process.platform === "win32" ? [] : ["/usr/local/bin", "/usr/bin"];
+  return [...current, ...extra]
+    .filter((value, index, all) => value && all.indexOf(value) === index)
+    .join(path.delimiter);
 }
 
-async function loadPersisted(): Promise<PersistedRow[]> {
-  try {
-    const raw = await readFile(STATE_FILE, "utf8");
-    const parsed = JSON.parse(raw) as { processes?: PersistedRow[] };
-    return Array.isArray(parsed.processes) ? parsed.processes : [];
-  } catch {
-    return [];
+function pm2Env(extra?: Record<string, string>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    PATH: pm2Path(),
+    NODE_ENV: process.env.NODE_ENV || "production",
+  };
+  for (const key of ["HOME", "USER", "PM2_HOME", "LANG", "LC_ALL"] as const) {
+    const value = process.env[key];
+    if (value) env[key] = value;
   }
+  if (!env.HOME && process.platform !== "win32") env.HOME = "/root";
+  if (extra) Object.assign(env, extra);
+  return env;
 }
 
-async function savePersisted() {
-  await ensureDataDir();
-  const processes: PersistedRow[] = [];
-  for (const [slug, proc] of live) {
-    if (proc.child.pid && (proc.status === "running" || proc.status === "starting")) {
-      processes.push({
-        slug,
-        port: proc.port,
-        pid: proc.child.pid,
-        startedAt: proc.startedAt,
-      });
-    }
+/** Only demo-* processes. Never parovoz, the site, or the webhook listener. */
+function pm2Name(slug: string): string {
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(slug)) {
+    throw new Error("Некорректное имя демо");
   }
-  await writeFile(
-    STATE_FILE,
-    JSON.stringify({ processes }, null, 2),
-    "utf8",
-  );
+  return `demo-${slug}`;
 }
 
-async function hydrateFromDisk() {
-  if (hydrated) return;
-  hydrated = true;
-  const rows = await loadPersisted();
-  for (const row of rows) {
-    if (live.has(row.slug)) continue;
-    if (!isPidAlive(row.pid)) continue;
-    // Adopt only port/pid bookkeeping — child handle is gone after restart.
-    // Mark as running if port answers; otherwise clear.
-    const up = await canConnect(row.port);
-    if (!up) continue;
-    live.set(row.slug, {
-      child: { pid: row.pid } as ChildProcess,
-      port: row.port,
-      startedAt: row.startedAt,
-      status: "running",
-      error: null,
-    });
+function assertScript(script: string): string {
+  if (!/^[a-zA-Z0-9:_-]{1,40}$/.test(script)) {
+    throw new Error("Некорректный npm-скрипт");
   }
+  return script;
+}
+
+function runPm2(
+  args: string[],
+  extra?: Record<string, string>,
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      pm2Bin(),
+      args,
+      {
+        env: pm2Env(extra),
+        windowsHide: true,
+        timeout: 30_000,
+        maxBuffer: 8 * 1024 * 1024,
+        shell: process.platform === "win32",
+      },
+      (err, stdout, stderr) => {
+        if (err) {
+          const text = `${stderr || stdout || err.message}`.trim();
+          reject(
+            new Error(
+              /ENOENT/.test(text)
+                ? "На сервере не найден pm2"
+                : text || "pm2 завершился с ошибкой",
+            ),
+          );
+          return;
+        }
+        resolve({ stdout: String(stdout), stderr: String(stderr) });
+      },
+    );
+  });
+}
+
+async function pm2List(): Promise<Pm2Proc[]> {
+  const { stdout } = await runPm2(["jlist"]);
+  const start = stdout.indexOf("[");
+  if (start < 0) return [];
+  const parsed = JSON.parse(stdout.slice(start)) as Pm2Proc[];
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+function findProc(list: Pm2Proc[], slug: string): Pm2Proc | undefined {
+  const name = pm2Name(slug);
+  return list.find((proc) => proc.name === name);
+}
+
+function portOf(proc: Pm2Proc | undefined): number | null {
+  const raw = proc?.pm2_env?.PORT ?? proc?.pm2_env?.env?.PORT;
+  const port = Number(raw);
+  return Number.isInteger(port) && port > 0 ? port : null;
+}
+
+function mapStatus(proc: Pm2Proc | undefined): DemoStatus {
+  const status = proc?.pm2_env?.status;
+  if (!proc || status === "stopped" || status === "stopping") return "stopped";
+  if (status === "online") return "running";
+  if (status === "launching" || status === "waiting restart") return "starting";
+  if (status === "errored") return "error";
+  return "stopped";
 }
 
 function canConnect(port: number, host = "127.0.0.1"): Promise<boolean> {
@@ -124,74 +155,61 @@ function canConnect(port: number, host = "127.0.0.1"): Promise<boolean> {
   });
 }
 
-async function findFreePort(): Promise<number> {
+async function findFreePort(list: Pm2Proc[]): Promise<number> {
   const used = new Set(
-    [...live.values()].map((p) => p.port).filter(Boolean),
+    list.map((proc) => portOf(proc)).filter((port): port is number => port !== null),
   );
   for (let port = PORT_MIN; port <= PORT_MAX; port++) {
     if (used.has(port)) continue;
-    const busy = await canConnect(port);
-    if (!busy) return port;
+    if (!(await canConnect(port))) return port;
   }
   throw new Error("Нет свободных портов 4100–4199");
 }
 
-function killPid(pid: number) {
-  if (!pid) return;
+async function waitForPort(port: number, ms: number): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (await canConnect(port)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return false;
+}
+
+async function pm2Delete(name: string): Promise<void> {
   try {
-    if (process.platform === "win32") {
-      spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-    } else {
-      process.kill(-pid, "SIGTERM");
-    }
-  } catch {
-    try {
-      process.kill(pid, "SIGKILL");
-    } catch {
-      /* ignore */
-    }
+    await runPm2(["delete", name]);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!/not found|doesn't exist|does not exist/i.test(message)) throw err;
   }
 }
 
-function toRuntime(meta: DemoMeta): DemoRuntime {
-  const proc = live.get(meta.slug);
-  if (!proc) {
-    return {
-      slug: meta.slug,
-      status: "stopped",
-      port: null,
-      pid: null,
-      startedAt: null,
-      error: null,
-      url: demoPublicUrl(meta.slug),
-    };
-  }
+async function pm2Save(): Promise<void> {
+  await runPm2(["save"]);
+}
 
-  const pid = proc.child.pid ?? null;
-  if (proc.status === "running" && pid && !isPidAlive(pid)) {
-    live.delete(meta.slug);
-    void savePersisted();
-    return {
-      slug: meta.slug,
-      status: "stopped",
-      port: null,
-      pid: null,
-      startedAt: null,
-      error: null,
-      url: demoPublicUrl(meta.slug),
-    };
+async function errorTail(proc: Pm2Proc | undefined): Promise<string> {
+  const file = proc?.pm2_env?.pm_err_log_path;
+  if (!file) return "";
+  try {
+    const text = await readFile(file, "utf8");
+    return text.trim().slice(-400);
+  } catch {
+    return "";
   }
+}
 
+function toRuntime(meta: DemoMeta, proc: Pm2Proc | undefined): DemoRuntime {
+  const status = mapStatus(proc);
+  const uptime = proc?.pm2_env?.pm_uptime;
   return {
     slug: meta.slug,
-    status: proc.status,
-    port: proc.port,
-    pid,
-    startedAt: proc.startedAt,
-    error: proc.error,
+    status,
+    port: status === "stopped" ? null : portOf(proc),
+    pid: status === "stopped" ? null : proc?.pid ?? null,
+    startedAt:
+      status !== "stopped" && uptime ? new Date(uptime).toISOString() : null,
+    error: status === "error" ? "PM2 не смог удержать процесс" : null,
     url: demoPublicUrl(meta.slug),
   };
 }
@@ -199,156 +217,89 @@ function toRuntime(meta: DemoMeta): DemoRuntime {
 export async function listDemoRuntimes(): Promise<
   (DemoMeta & DemoRuntime)[]
 > {
-  await hydrateFromDisk();
-  const demos = await listWorkspaceDemos();
-  return demos.map((meta) => ({ ...meta, ...toRuntime(meta) }));
+  const [demos, procs] = await Promise.all([
+    listWorkspaceDemos(),
+    pm2List(),
+  ]);
+  return demos.map((meta) => ({ ...meta, ...toRuntime(meta, findProc(procs, meta.slug)) }));
 }
 
 export async function getDemoRuntime(
   slug: string,
 ): Promise<(DemoMeta & DemoRuntime) | null> {
-  await hydrateFromDisk();
   const meta = await getWorkspaceDemo(slug);
   if (!meta) return null;
-  return { ...meta, ...toRuntime(meta) };
+  const proc = findProc(await pm2List(), slug);
+  return { ...meta, ...toRuntime(meta, proc) };
 }
 
 export async function getRunningPort(slug: string): Promise<number | null> {
-  await hydrateFromDisk();
-  const proc = live.get(slug);
-  if (!proc || proc.status === "error" || proc.status === "stopped") {
-    return null;
-  }
-  if (proc.child.pid && !isPidAlive(proc.child.pid)) {
-    // Orphaned bookkeeping after server restart — still allow proxy if port up
-    if (await canConnect(proc.port)) return proc.port;
-    live.delete(slug);
-    void savePersisted();
-    return null;
-  }
-  return proc.port;
+  const proc = findProc(await pm2List(), slug);
+  if (mapStatus(proc) !== "running" && mapStatus(proc) !== "starting") return null;
+  return portOf(proc);
 }
 
 export async function startDemo(
   slug: string,
 ): Promise<DemoMeta & DemoRuntime> {
-  await hydrateFromDisk();
   const meta = await getWorkspaceDemo(slug);
   if (!meta) throw new Error("Демо не найдено");
   if (!meta.hasPackageJson) {
     throw new Error("Нужен package.json со скриптом start");
   }
+  const script = assertScript(meta.script);
+  const name = pm2Name(slug);
 
-  const existing = live.get(slug);
-  if (existing && (existing.status === "running" || existing.status === "starting")) {
-    if (existing.child.pid && isPidAlive(existing.child.pid)) {
-      return { ...meta, ...toRuntime(meta) };
-    }
-    live.delete(slug);
+  const existing = findProc(await pm2List(), slug);
+  const existingPort = portOf(existing);
+  if (
+    mapStatus(existing) === "running" &&
+    existingPort &&
+    (await canConnect(existingPort))
+  ) {
+    return { ...meta, ...toRuntime(meta, existing) };
   }
 
-  const port = await findFreePort();
-  const startedAt = new Date().toISOString();
-  // Windows: spawning npm.cmd without shell → EINVAL on Node 20+
-  const child = spawn("npm", ["run", meta.script], {
-    cwd: meta.dir,
-    env: {
-      ...process.env,
-      PORT: String(port),
-      HOST: "127.0.0.1",
-    },
-    stdio: "pipe",
-    shell: true,
-    windowsHide: true,
-    detached: process.platform !== "win32",
-  });
+  if (existing) await pm2Delete(name);
 
-  const entry: LiveProc = {
-    child,
-    port,
-    startedAt,
-    status: "starting",
-    error: null,
-  };
-  live.set(slug, entry);
-
-  let stderr = "";
-  child.stderr?.on("data", (buf: Buffer) => {
-    stderr += buf.toString("utf8").slice(-2000);
-  });
-  child.stdout?.on("data", () => {
-    /* drain */
-  });
-
-  child.on("exit", (code) => {
-    const cur = live.get(slug);
-    if (cur?.child !== child) return;
-    if (cur.status === "starting" || cur.status === "running") {
-      cur.status = "error";
-      cur.error =
-        code === 0
-          ? "Процесс завершился"
-          : `Exit ${code}${stderr ? `: ${stderr.trim().slice(-400)}` : ""}`;
-    }
-    void savePersisted();
-  });
+  const port = await findFreePort(await pm2List());
+  await runPm2(
+    ["start", "npm", "--name", name, "--cwd", meta.dir, "--update-env", "--", "run", script],
+    { PORT: String(port), HOST: "127.0.0.1" },
+  );
 
   const ready = await waitForPort(port, 20_000);
   if (!ready) {
-    killPid(child.pid ?? 0);
-    live.delete(slug);
-    await savePersisted();
+    const failed = findProc(await pm2List(), slug);
+    const tail = await errorTail(failed);
+    await pm2Delete(name);
+    await pm2Save();
     throw new Error(
-      stderr.trim()
-        ? `Не поднялся порт ${port}: ${stderr.trim().slice(-400)}`
+      tail
+        ? `Не поднялся порт ${port}: ${tail}`
         : `Не поднялся порт ${port} за 20с`,
     );
   }
 
-  entry.status = "running";
-  entry.error = null;
-  await savePersisted();
-  return { ...meta, ...toRuntime(meta) };
-}
-
-async function waitForPort(port: number, ms: number): Promise<boolean> {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    if (await canConnect(port)) return true;
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  return false;
+  await pm2Save();
+  const proc = findProc(await pm2List(), slug);
+  return { ...meta, ...toRuntime(meta, proc) };
 }
 
 export async function stopDemo(
   slug: string,
 ): Promise<DemoMeta & DemoRuntime> {
-  await hydrateFromDisk();
   const meta = await getWorkspaceDemo(slug);
   if (!meta) throw new Error("Демо не найдено");
-
-  const proc = live.get(slug);
-  if (proc) {
-    const pid = proc.child.pid;
-    if (pid) killPid(pid);
-    // Also try persisted pid if child was adopted
-    live.delete(slug);
-    await savePersisted();
-  } else {
-    const rows = await loadPersisted();
-    const row = rows.find((r) => r.slug === slug);
-    if (row?.pid) killPid(row.pid);
-    await savePersisted();
-  }
-
-  return { ...meta, ...toRuntime(meta) };
+  await pm2Delete(pm2Name(slug));
+  await pm2Save();
+  return { ...meta, ...toRuntime(meta, undefined) };
 }
 
 /** Resolve proxy target for a running demo. */
 export async function resolveDemoTarget(
   slug: string,
 ): Promise<{ port: number } | { error: string; status: number }> {
-  await hydrateFromDisk();
   const meta = await getWorkspaceDemo(slug);
   if (!meta) return { error: "Демо не найдено", status: 404 };
 

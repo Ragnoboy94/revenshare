@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
+import { demoHostName } from "@/lib/demo-host";
 
 function hostname(hostHeader: string | null): string {
   return (hostHeader ?? "").split(":")[0].toLowerCase();
 }
 
 function isDemoHost(host: string): boolean {
-  const configured = process.env.NEXT_PUBLIC_DEMO_HOST?.toLowerCase();
+  const configured = demoHostName().toLowerCase();
   if (configured && host === configured) return true;
   if (host === "demo.localhost") return true;
   return host.startsWith("demo.");
@@ -27,7 +28,7 @@ function siteOrigin(req: NextRequest): string {
 }
 
 function demoOrigin(req: NextRequest): string {
-  const demoHost = process.env.NEXT_PUBLIC_DEMO_HOST ?? "demo.localhost";
+  const demoHost = demoHostName();
   const port = req.nextUrl.port;
   const portPart =
     port && port !== "80" && port !== "443" ? `:${port}` : "";

@@ -1,6 +1,7 @@
 import { existsSync } from "fs";
 import { readdir, readFile, stat } from "fs/promises";
 import path from "path";
+import { demoHostName } from "@/lib/demo-host";
 
 export type DemoMeta = {
   slug: string;
@@ -31,7 +32,7 @@ export function demoWorkspaceRoot(): string {
 }
 
 export function demoPublicUrl(slug: string, origin?: string): string {
-  const demoHost = process.env.NEXT_PUBLIC_DEMO_HOST ?? "demo.localhost";
+  const demoHost = demoHostName();
   const site = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3040";
   let base = origin;
   if (!base) {
