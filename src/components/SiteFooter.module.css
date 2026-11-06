@@ -85,6 +85,11 @@
   color: var(--accent-deep);
 }
 
+.disclaimer {
+  flex: 1 1 100%;
+  margin: 0;
+}
+
 @media (max-width: 800px) {
   .inner {
     grid-template-columns: 1fr;

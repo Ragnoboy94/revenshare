@@ -34,6 +34,9 @@ export function SiteFooter() {
           <p className={styles.legalLinks}>
             <Link href="/privacy">Политика ПДн</Link>
           </p>
+          <p className={styles.disclaimer}>
+            Информация на сайте не является публичной офертой (ст. 437 ГК РФ).
+          </p>
         </div>
       </div>
     </footer>
