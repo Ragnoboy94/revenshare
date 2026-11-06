@@ -1,3 +1,4 @@
+import { injectDemoDisclaimer } from "@/lib/demo-disclaimer";
 import { resolveDemoTarget } from "@/lib/demo-runner";
 
 export const runtime = "nodejs";
@@ -51,8 +52,27 @@ code{background:#f2f2f2;padding:.1rem .35rem;border-radius:4px}</style></head>
   const outHeaders = new Headers(upstreamRes.headers);
   outHeaders.set("X-Robots-Tag", "noindex, nofollow");
   outHeaders.delete("transfer-encoding");
+  outHeaders.delete("content-encoding");
+  outHeaders.delete("content-length");
 
-  return new Response(upstreamRes.body, {
+  const contentType = (upstreamRes.headers.get("content-type") ?? "").toLowerCase();
+  const isHtml =
+    contentType.includes("text/html") || contentType.includes("application/xhtml");
+
+  if (!isHtml || request.method === "HEAD") {
+    return new Response(request.method === "HEAD" ? null : upstreamRes.body, {
+      status: upstreamRes.status,
+      statusText: upstreamRes.statusText,
+      headers: outHeaders,
+    });
+  }
+
+  const html = await upstreamRes.text();
+  const patched = injectDemoDisclaimer(html);
+  outHeaders.set("Content-Type", "text/html; charset=utf-8");
+  outHeaders.set("Cache-Control", "no-store");
+
+  return new Response(patched, {
     status: upstreamRes.status,
     statusText: upstreamRes.statusText,
     headers: outHeaders,
