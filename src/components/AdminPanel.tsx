@@ -7,12 +7,14 @@ import {
   useRef,
   useState,
 } from "react";
+import type { Board } from "@/lib/boards-shared";
 import type { DemoPublic } from "@/lib/demo-public";
 import type { Lead, LeadStatus } from "@/lib/leads-store";
+import { AdminBoards } from "./AdminBoards";
 import styles from "./AdminPanel.module.css";
 
 type DemoRow = DemoPublic;
-type SectionId = "leads" | "demos";
+type SectionId = "leads" | "demos" | "boards";
 
 type NavItem = {
   id: SectionId;
@@ -23,6 +25,7 @@ type NavItem = {
 const NAV: NavItem[] = [
   { id: "leads", label: "Заявки" },
   { id: "demos", label: "Демо" },
+  { id: "boards", label: "Доски" },
 ];
 
 type Props = {
@@ -31,6 +34,7 @@ type Props = {
   initialAuthed: boolean;
   initialLeads: Lead[];
   initialDemos: DemoRow[];
+  initialBoards: Board[];
 };
 
 const STATUS_LABEL: Record<LeadStatus, string> = {
@@ -49,6 +53,13 @@ const DEMO_STATUS_LABEL: Record<DemoRow["status"], string> = {
 const SEARCH_PLACEHOLDER: Record<SectionId, string> = {
   leads: "Имя, телефон, ниша…",
   demos: "Slug или название…",
+  boards: "Проект или клиент…",
+};
+
+const SECTION_TITLE: Record<SectionId, string> = {
+  leads: "Заявки",
+  demos: "Демо",
+  boards: "Доски",
 };
 
 function formatDate(iso: string): string {
@@ -82,15 +93,19 @@ export function AdminPanel({
   initialAuthed,
   initialLeads,
   initialDemos,
+  initialBoards,
 }: Props) {
   const [authed, setAuthed] = useState(initialAuthed);
   const [leads, setLeads] = useState(initialLeads);
   const [demos, setDemos] = useState(initialDemos);
+  const [boards, setBoards] = useState(initialBoards);
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [demoBusy, setDemoBusy] = useState<string | null>(null);
   const [demoError, setDemoError] = useState("");
+  const [boardBusy, setBoardBusy] = useState<string | null>(null);
+  const [openBoardId, setOpenBoardId] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | LeadStatus>("all");
   const [section, setSection] = useState<SectionId>("leads");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -138,8 +153,13 @@ export function AdminPanel({
       in_progress: leads.filter((l) => l.status === "in_progress").length,
       done: leads.filter((l) => l.status === "done").length,
       demosRunning: demos.filter((d) => d.status === "running").length,
+      boards: boards.length,
+      openWishes: boards.reduce(
+        (sum, board) => sum + board.cards.filter((c) => c.status === "wish").length,
+        0,
+      ),
     }),
-    [leads, demos],
+    [leads, demos, boards],
   );
 
   const visibleLeads = useMemo(() => {
@@ -165,13 +185,38 @@ export function AdminPanel({
 
   function navBadge(id: SectionId): number {
     if (id === "leads") return counts.new > 0 ? counts.new : counts.all;
+    if (id === "boards") return counts.openWishes > 0 ? counts.openWishes : counts.boards;
     return demos.length;
   }
 
+  async function readJson<T>(res: Response): Promise<T | null> {
+    const text = await res.text();
+    if (!text) return null;
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      return null;
+    }
+  }
+
   async function refreshDemos() {
-    const res = await fetch(`${apiBase}/demos`);
-    const json = (await res.json()) as { ok?: boolean; demos?: DemoRow[] };
-    if (res.ok && json.demos) setDemos(json.demos);
+    try {
+      const res = await fetch(`${apiBase}/demos`);
+      const json = await readJson<{ ok?: boolean; demos?: DemoRow[] }>(res);
+      if (res.ok && json?.demos) setDemos(json.demos);
+    } catch {
+      /* keep previous list */
+    }
+  }
+
+  async function refreshBoards() {
+    try {
+      const res = await fetch(`${apiBase}/boards`);
+      const json = await readJson<{ ok?: boolean; boards?: Board[] }>(res);
+      if (res.ok && json?.boards) setBoards(json.boards);
+    } catch {
+      /* keep previous list — e.g. route not deployed yet */
+    }
   }
 
   async function onLogin(event: FormEvent) {
@@ -184,13 +229,16 @@ export function AdminPanel({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password }),
       });
-      const json = (await res.json()) as { ok?: boolean; error?: string };
-      if (!res.ok || !json.ok) throw new Error(json.error || "Ошибка входа");
+      const json = await readJson<{ ok?: boolean; error?: string }>(res);
+      if (!res.ok || !json?.ok) {
+        throw new Error(json?.error || "Ошибка входа");
+      }
 
       const listRes = await fetch(`${apiBase}/leads`);
-      const listJson = (await listRes.json()) as { ok?: boolean; leads?: Lead[] };
-      setLeads(listJson.leads ?? []);
+      const listJson = await readJson<{ ok?: boolean; leads?: Lead[] }>(listRes);
+      setLeads(listJson?.leads ?? []);
       await refreshDemos();
+      await refreshBoards();
       setAuthed(true);
       setPassword("");
     } catch (err) {
@@ -205,6 +253,7 @@ export function AdminPanel({
     setAuthed(false);
     setLeads([]);
     setDemos([]);
+    setBoards([]);
     setMenuOpen(false);
   }
 
@@ -222,6 +271,43 @@ export function AdminPanel({
       setLeads((list) =>
         list.map((lead) => (lead.id === id ? { ...lead, status: prev } : lead)),
       );
+    }
+  }
+
+  async function openDemoBoard(demo: DemoRow) {
+    setBoardBusy(demo.slug);
+    setDemoError("");
+    try {
+      const res = await fetch(`${apiBase}/boards`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ensureDemo: true,
+          demoSlug: demo.slug,
+          title: demo.title || demo.slug,
+        }),
+      });
+      const json = (await res.json()) as {
+        ok?: boolean;
+        error?: string;
+        board?: Board;
+        created?: boolean;
+      };
+      if (!res.ok || !json.ok || !json.board) {
+        throw new Error(json.error || "Не удалось открыть кабинет");
+      }
+      setBoards((prev) => {
+        const exists = prev.some((board) => board.id === json.board!.id);
+        return exists
+          ? prev.map((board) => (board.id === json.board!.id ? json.board! : board))
+          : [json.board!, ...prev];
+      });
+      setOpenBoardId(json.board.id);
+      go("boards");
+    } catch (err) {
+      setDemoError(err instanceof Error ? err.message : "Ошибка");
+    } finally {
+      setBoardBusy(null);
     }
   }
 
@@ -298,7 +384,7 @@ export function AdminPanel({
     );
   }
 
-  const title = section === "leads" ? "Заявки" : "Демо";
+  const title = SECTION_TITLE[section];
 
   return (
     <div className={styles.shell}>
@@ -383,10 +469,17 @@ export function AdminPanel({
             <span className={styles.meta}>
               {section === "leads"
                 ? `${visibleLeads.length} из ${leads.length}`
-                : `${counts.demosRunning} online · ${visibleDemos.length}`}
+                : section === "demos"
+                  ? `${counts.demosRunning} online · ${visibleDemos.length}`
+                  : `${counts.openWishes} пожеланий · ${boards.length}`}
             </span>
             {section === "demos" ? (
               <button type="button" className={styles.btn} onClick={() => refreshDemos()}>
+                Обновить
+              </button>
+            ) : null}
+            {section === "boards" ? (
+              <button type="button" className={styles.btn} onClick={() => refreshBoards()}>
                 Обновить
               </button>
             ) : null}
@@ -549,6 +642,14 @@ export function AdminPanel({
                                   {busy ? "…" : "Старт"}
                                 </button>
                               )}
+                              <button
+                                type="button"
+                                className={styles.btn}
+                                disabled={boardBusy === demo.slug}
+                                onClick={() => openDemoBoard(demo)}
+                              >
+                                {boardBusy === demo.slug ? "…" : "Заявки"}
+                              </button>
                               {demo.status === "running" ? (
                                 <a href={demo.url} target="_blank" rel="noreferrer">
                                   Открыть
@@ -563,6 +664,17 @@ export function AdminPanel({
                 </table>
               )}
             </>
+          ) : null}
+
+          {section === "boards" ? (
+            <AdminBoards
+              apiBase={apiBase}
+              boards={boards}
+              query={query}
+              openBoardId={openBoardId}
+              onBoardsChange={setBoards}
+              onOpenBoardHandled={() => setOpenBoardId(null)}
+            />
           ) : null}
         </div>
       </div>

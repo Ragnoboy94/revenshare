@@ -24,8 +24,13 @@ export async function GET(_request: Request, context: Ctx) {
   const denied = await guard(slug);
   if (denied) return denied;
 
-  const demos = (await listDemoRuntimes()).map(toDemoPublic);
-  return NextResponse.json({ ok: true, demos });
+  try {
+    const demos = (await listDemoRuntimes()).map(toDemoPublic);
+    return NextResponse.json({ ok: true, demos });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Ошибка списка демо";
+    return NextResponse.json({ ok: false, error: message, demos: [] }, { status: 500 });
+  }
 }
 
 export async function POST(request: Request, context: Ctx) {

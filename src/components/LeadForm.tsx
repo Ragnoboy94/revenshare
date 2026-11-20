@@ -85,7 +85,7 @@ export function LeadForm() {
           <h2 id="lead-title">Обсудить проект</h2>
           <p className={styles.sub}>
             Коротко опишите нишу и телефон. На созвоне разберём модель {IP.brand} —
-            демостенд, 10% с заявок с сайта или выкуп 29 000 ₽.
+            демостенд, 10% с заявок с сайта или выкуп от 29 000 ₽.
           </p>
           <ul className={styles.perks}>
             <li>

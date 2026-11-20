@@ -22,7 +22,7 @@ export function WhyBento() {
             </p>
           </article>
           <article className={styles.card}>
-            <h3>Выкуп 29 000 ₽</h3>
+            <h3>Выкуп от 29 000 ₽</h3>
             <p className={styles.text}>
               Если через 3 месяца заявок с сайта нет — понятный выход по договору.
             </p>

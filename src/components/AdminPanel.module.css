@@ -360,7 +360,7 @@
 }
 
 .colActions {
-  width: 10rem;
+  width: 14rem;
 }
 
 .table th {
@@ -526,6 +526,139 @@
   text-align: center;
   color: var(--ink-faint);
   font-size: 0.9rem;
+}
+
+.boardWrap {
+  display: grid;
+  gap: 0.75rem;
+  padding-bottom: 1.5rem;
+}
+
+.boardCreate {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) auto;
+  gap: 0.45rem;
+  padding: 0.75rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-elevated);
+}
+
+.boardCreate input,
+.replyField textarea {
+  border: 1px solid var(--line);
+  background: #fff;
+  padding: 0.45rem 0.55rem;
+  font: inherit;
+  font-size: 0.86rem;
+  color: var(--ink);
+}
+
+.boardToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.boardHeading {
+  min-width: 0;
+  flex: 1 1 160px;
+}
+
+.boardHeading strong {
+  display: block;
+  font-size: 0.95rem;
+}
+
+.kanban {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(200px, 1fr));
+  gap: 0.65rem;
+  padding: 0.75rem;
+  overflow-x: auto;
+  align-items: start;
+}
+
+.kanbanCol {
+  min-width: 0;
+  background: var(--bg-elevated);
+  border: 1px solid var(--line);
+}
+
+.kanbanHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.78rem;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--ink-muted);
+}
+
+.kanbanList {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.5rem;
+  min-height: 4rem;
+}
+
+.kanbanCard {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.55rem;
+  background: #fff;
+  border: 1px solid var(--line);
+}
+
+.kanbanCardTop {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.45rem;
+}
+
+.kanbanCardTop strong {
+  font-size: 0.86rem;
+  line-height: 1.35;
+}
+
+.kanbanBody {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--ink-muted);
+  white-space: pre-wrap;
+}
+
+.replyField {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.replyField span {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--ink-faint);
+}
+
+.replyField textarea {
+  resize: vertical;
+  min-height: 2.6rem;
+}
+
+@media (max-width: 820px) {
+  .boardCreate {
+    grid-template-columns: 1fr;
+  }
+
+  .kanban {
+    grid-template-columns: repeat(4, minmax(220px, 1fr));
+  }
 }
 
 .mobileToggle {

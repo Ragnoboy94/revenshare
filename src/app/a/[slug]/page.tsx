@@ -6,6 +6,7 @@ import {
   isAdminRequest,
   verifyAdminPath,
 } from "@/lib/admin-auth";
+import { listBoards } from "@/lib/boards-store";
 import { listDemoRuntimes } from "@/lib/demo-runner";
 import { toDemoPublic } from "@/lib/demo-public";
 import { listLeads } from "@/lib/leads-store";
@@ -34,6 +35,7 @@ export default async function SecretAdminPage({ params }: Props) {
   const demos = authed
     ? (await listDemoRuntimes()).map(toDemoPublic)
     : [];
+  const boards = authed ? await listBoards() : [];
 
   return (
     <AdminPanel
@@ -42,6 +44,7 @@ export default async function SecretAdminPage({ params }: Props) {
       initialAuthed={authed}
       initialLeads={leads}
       initialDemos={demos}
+      initialBoards={boards}
     />
   );
 }

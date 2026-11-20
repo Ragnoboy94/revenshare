@@ -110,7 +110,7 @@ function IconSettings() {
 const TRUST = [
   { label: "Без предоплаты", Icon: IconShield },
   { label: "Демо до договора", Icon: IconCases },
-  { label: "10% с заявок / выкуп 29 000 ₽", Icon: IconPercent },
+  { label: "10% с заявок / выкуп от 29 000 ₽", Icon: IconPercent },
 ] as const;
 
 const NAV = [
@@ -138,7 +138,7 @@ export function Hero() {
           <p className={styles.sub}>
             Собираем сайт на демостенде и правим до договора. Хостинг подготавливаем
             мы, стоимость трёх месяцев оплачиваете вы. Дальше — 10% со всех заявок клиентов с сайта,
-            включая повторные. Нет заявок — выкуп за 29 000 ₽.
+            включая повторные. Нет заявок — выкуп от 29 000 ₽.
           </p>
           <div className={styles.actions}>
             <a href="#lead" className="btn btnLg">
