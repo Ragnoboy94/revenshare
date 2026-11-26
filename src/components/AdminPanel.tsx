@@ -11,10 +11,11 @@ import type { Board } from "@/lib/boards-shared";
 import type { DemoPublic } from "@/lib/demo-public";
 import type { Lead, LeadStatus } from "@/lib/leads-store";
 import { AdminBoards } from "./AdminBoards";
+import { AdminOutreach } from "./AdminOutreach";
 import styles from "./AdminPanel.module.css";
 
 type DemoRow = DemoPublic;
-type SectionId = "leads" | "demos" | "boards";
+type SectionId = "leads" | "demos" | "boards" | "outreach";
 
 type NavItem = {
   id: SectionId;
@@ -26,6 +27,7 @@ const NAV: NavItem[] = [
   { id: "leads", label: "Заявки" },
   { id: "demos", label: "Демо" },
   { id: "boards", label: "Доски" },
+  { id: "outreach", label: "Рассылка" },
 ];
 
 type Props = {
@@ -54,12 +56,14 @@ const SEARCH_PLACEHOLDER: Record<SectionId, string> = {
   leads: "Имя, телефон, ниша…",
   demos: "Slug или название…",
   boards: "Проект или клиент…",
+  outreach: "Компания, email, ОГРН…",
 };
 
 const SECTION_TITLE: Record<SectionId, string> = {
   leads: "Заявки",
   demos: "Демо",
   boards: "Доски",
+  outreach: "Рассылка",
 };
 
 function formatDate(iso: string): string {
@@ -186,6 +190,7 @@ export function AdminPanel({
   function navBadge(id: SectionId): number {
     if (id === "leads") return counts.new > 0 ? counts.new : counts.all;
     if (id === "boards") return counts.openWishes > 0 ? counts.openWishes : counts.boards;
+    if (id === "outreach") return 0;
     return demos.length;
   }
 
@@ -433,15 +438,17 @@ export function AdminPanel({
           </button>
           <h1 className={styles.barTitle}>{title}</h1>
 
-          <input
-            ref={searchRef}
-            className={styles.search}
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={SEARCH_PLACEHOLDER[section]}
-            aria-label="Поиск"
-          />
+          {section !== "outreach" ? (
+            <input
+              ref={searchRef}
+              className={styles.search}
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={SEARCH_PLACEHOLDER[section]}
+              aria-label="Поиск"
+            />
+          ) : null}
 
           {section === "leads" ? (
             <div className={styles.filters}>
@@ -471,7 +478,9 @@ export function AdminPanel({
                 ? `${visibleLeads.length} из ${leads.length}`
                 : section === "demos"
                   ? `${counts.demosRunning} online · ${visibleDemos.length}`
-                  : `${counts.openWishes} пожеланий · ${boards.length}`}
+                  : section === "boards"
+                    ? `${counts.openWishes} пожеланий · ${boards.length}`
+                    : "Checko → email → письмо"}
             </span>
             {section === "demos" ? (
               <button type="button" className={styles.btn} onClick={() => refreshDemos()}>
@@ -675,6 +684,10 @@ export function AdminPanel({
               onBoardsChange={setBoards}
               onOpenBoardHandled={() => setOpenBoardId(null)}
             />
+          ) : null}
+
+          {section === "outreach" ? (
+            <AdminOutreach apiBase={apiBase} />
           ) : null}
         </div>
       </div>

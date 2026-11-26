@@ -50,6 +50,22 @@ next-env.d.ts
 /demo-workspace/*/dist/
 
 docs/
-scripts/
+scripts/*
+!scripts/outreach/
+!scripts/outreach/**
 demo-workspace/
+
+# Checko kit (cookies/session — never commit)
+checko-portable-kit/
+# Letter kit snapshot from navicert (reference only)
+outreach-letter-kit/
+data/outreach-unsubscribed.json
+.playwright-browsers/
+data/checko-pw-profile/
+data/checko-pw-profile-*/
+data/checko-access-block.json
+data/outreach.json
+data/outreach-sends.json
+data/outreach-config.json
+data/outreach-schedule.json
 

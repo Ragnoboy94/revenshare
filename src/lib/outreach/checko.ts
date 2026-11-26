@@ -1,0 +1,1223 @@
+/**
+ * Парсер checko.ru для рассылки по новым организациям.
+ *
+ * Фаза 1 (срочная): только список /search/advanced — без карточек.
+ * Фаза 2 (фон): карточки /company/... по одной, с «человеческими» паузами → email + телефон.
+ */
+
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { formatRuPhone, normalizeRuPhone } from "@/lib/phone";
+import type { FsaApplicant, FsaDeclaration } from "./types";
+import { ensurePlaywrightBrowsersEnv } from "./playwright-env";
+export {
+  NEW_REG_WINDOW_DAYS,
+  getNewRegistrationsRange,
+  ruDateToIso,
+} from "./checko-range";
+import { getNewRegistrationsRange, ruDateToIso } from "./checko-range";
+import {
+  isCheckoBlocked,
+  getCheckoBlockReason,
+  markCheckoBlocked,
+  withCheckoProfileLock,
+} from "./checko-guard";
+import { NEW_REG_CHECKO_ACTIVITY_IDS } from "./new-reg-okved-data";
+import { buildCheckoAdvancedListUrl } from "./checko-pagination";
+import { getFsaProxy, playwrightProxyOptions } from "./fsa-proxy-shared";
+import {
+  checkoProfileDir,
+  checkoProfileLockPath,
+} from "./checko-profile-path";
+import { peekOutreachConfigSync } from "@/lib/outreach-config";
+
+export const CHECKO_BASE = "https://checko.ru";
+export const CHECKO_ADVANCED_PATH = "/search/advanced";
+
+const USER_AGENT =
+  process.env.OUTREACH_CHECKO_UA?.trim() ||
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+const MONTHS_RU: Record<string, number> = {
+  января: 1,
+  февраля: 2,
+  марта: 3,
+  апреля: 4,
+  мая: 5,
+  июня: 6,
+  июля: 7,
+  августа: 8,
+  сентября: 9,
+  октября: 10,
+  ноября: 11,
+  декабря: 12,
+};
+
+export type CheckoListItem = {
+  path: string;
+  ogrn: string;
+  url: string;
+  name?: string;
+};
+
+export type CheckoCompany = {
+  path: string;
+  url: string;
+  ogrn: string;
+  inn?: string;
+  shortName?: string;
+  fullName?: string;
+  registrationDateIso?: string;
+  registrationDateRu?: string;
+  email?: string;
+  emails: string[];
+  phone?: string;
+  phones: string[];
+  okved?: string;
+};
+
+export type CheckoSearchPage = {
+  page: number;
+  total: number;
+  from: number;
+  to: number;
+  items: CheckoListItem[];
+  hasMore: boolean;
+};
+
+export type CheckoScanOptions = {
+  dateFrom?: string;
+  dateTo?: string;
+  /** На срочной фазе всегда false — email в фоне. */
+  emailsOnly?: boolean;
+  /** Не ходить на карточки (по умолчанию true для срочной загрузки). */
+  listOnly?: boolean;
+  maxItems?: number;
+  maxPages?: number;
+  startPage?: number;
+  skipOgrns?: Iterable<string>;
+  delayMs?: number;
+  /** Доп. query для сортировки списка, напр. order=reg_date */
+  sortQuery?: string;
+  onPage?: (page: CheckoSearchPage) => void;
+  onCompany?: (company: CheckoCompany) => void;
+  /** Вызывается после каждой страницы списка: сколько новых (не skip) vs пропущено. */
+  onPageProgress?: (stats: {
+    page: number;
+    total: number;
+    listed: number;
+    newCount: number;
+    skipCount: number;
+  }) => void;
+};
+
+export type CheckoScanResult = {
+  range: { from: string; to: string };
+  pagesFetched: number;
+  companies: CheckoCompany[];
+  declarations: FsaDeclaration[];
+  nextPage: number;
+  hasMore: boolean;
+  totalOnSite?: number;
+};
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Всегда в pm2/out — для ночного cron и ручной диагностики на проде. */
+export function logCheckoScan(
+  phase: string,
+  details: Record<string, unknown> = {}
+): void {
+  console.info(
+    `[checko-scan] ${phase}`,
+    JSON.stringify({ at: new Date().toISOString(), ...details })
+  );
+}
+
+/** Подробные логи checko — только локально / с OUTREACH_DEBUG=1. На проде молчим. */
+function checkoDebug(...args: unknown[]): void {
+  if (
+    process.env.OUTREACH_DEBUG === "1" ||
+    process.env.NODE_ENV !== "production"
+  ) {
+    console.info(...args);
+  }
+}
+
+function checkoDebugWarn(...args: unknown[]): void {
+  if (
+    process.env.OUTREACH_DEBUG === "1" ||
+    process.env.NODE_ENV !== "production"
+  ) {
+    console.warn(...args);
+  }
+}
+
+function isoToRuDate(iso: string): string {
+  const [year, month, day] = iso.split("-");
+  return `${day}.${month}.${year}`;
+}
+
+function humanPauseMs(baseMs: number): number {
+  if (baseMs <= 0) return 0;
+  const jitter = 0.55 + Math.random() * 0.9;
+  return Math.round(baseMs * jitter);
+}
+
+/** Устойчивый переход на checko: commit → retry, иначе сырой ERR_TIMED_OUT. */
+async function gotoCheckoPage(
+  page: {
+    goto: (
+      url: string,
+      options?: { waitUntil?: "commit" | "domcontentloaded"; timeout?: number }
+    ) => Promise<unknown>;
+  },
+  url: string,
+  timeoutMs = 120_000
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const waitUntil = attempt === 1 ? "commit" : "domcontentloaded";
+    try {
+      await page.goto(url, { waitUntil, timeout: timeoutMs });
+      return;
+    } catch (error) {
+      lastError = error;
+      const msg = error instanceof Error ? error.message : String(error);
+      const retryable =
+        /ERR_TIMED_OUT|Timeout|timed?\s*out|ERR_PROXY|ERR_TUNNEL|ERR_CONNECTION|ERR_NETWORK|NS_ERROR/i.test(
+          msg
+        );
+      if (!retryable || attempt === 3) break;
+      checkoDebugWarn(
+        `[checko] goto retry ${attempt}/3 (${waitUntil}):`,
+        msg.slice(0, 160)
+      );
+      await sleep(1500 * attempt);
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(String(lastError ?? "checko goto failed"));
+}
+
+function checkoListDelayMs(optionsDelay?: number): number {
+  const raw =
+    optionsDelay ??
+    peekOutreachConfigSync().delayMs ??
+    Number(process.env.OUTREACH_CHECKO_DELAY_MS || 1800);
+  const min = process.env.OUTREACH_CHECKO_FAST === "1" ? 0 : 800;
+  return Math.max(raw, min);
+}
+
+function checkoEnrichParallel(): number {
+  return Math.min(
+    Math.max(Number(process.env.OUTREACH_CHECKO_ENRICH_PARALLEL || 1), 1),
+    4
+  );
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) =>
+      String.fromCharCode(parseInt(h, 16))
+    );
+}
+
+function stripTags(html: string): string {
+  return decodeHtmlEntities(html.replace(/<[^>]+>/g, " "))
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function parseCheckoRuDate(text: string): {
+  iso?: string;
+  ru?: string;
+} {
+  const m = text
+    .replace(/\s+/g, " ")
+    .match(
+      /(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s+(\d{4})/i
+    );
+  if (!m) return {};
+  const day = Number(m[1]);
+  const month = MONTHS_RU[m[2].toLowerCase()];
+  const year = Number(m[3]);
+  if (!month || !day || !year) return {};
+  const iso = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  return { iso, ru: isoToRuDate(iso) };
+}
+
+export function parseCheckoSearchPage(
+  html: string,
+  page: number
+): CheckoSearchPage {
+  const countMatch =
+    html.match(/Компании с\s+(\d+)\s+по\s+(\d+)\s+из\s+([\d\s]+)/i) ||
+    html.match(/Организации с\s+(\d+)\s+по\s+(\d+)\s+из\s+([\d\s]+)/i);
+
+  let from = 0;
+  let to = 0;
+  let total = 0;
+  if (countMatch) {
+    from = Number(countMatch[1]);
+    to = Number(countMatch[2]);
+    total = Number(countMatch[3].replace(/\s+/g, ""));
+  } else if (/не\s+найдено|ничего\s+не\s+найдено/i.test(html)) {
+    total = 0;
+  }
+
+  const seen = new Set<string>();
+  const items: CheckoListItem[] = [];
+  const re =
+    /href="(\/company\/([a-z0-9\-]+)-(\d{13}))"[^>]*>([\s\S]*?)<\/a>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) {
+    const path = m[1];
+    const ogrn = m[3];
+    if (seen.has(path)) continue;
+    // отсекаем служебные /company/select
+    if (path.includes("/select")) continue;
+    seen.add(path);
+    const name = stripTags(m[4]);
+    items.push({
+      path,
+      ogrn,
+      url: `${CHECKO_BASE}${path}`,
+      name: name || undefined,
+    });
+  }
+
+  const hasMore =
+    total > 0 ? to < total : /[?&]page=\d+|page-item/i.test(html) && items.length > 0;
+
+  return {
+    page,
+    total,
+    from,
+    to,
+    items,
+    hasMore: hasMore && items.length > 0,
+  };
+}
+
+export function parseCheckoOkved(html: string): string | undefined {
+  const sidebar = html.match(
+    /Вид деятельности<\/div>\s*<div>([\s\S]*?)<\/div>/i
+  )?.[1];
+  if (sidebar) {
+    const nameRaw =
+      sidebar.match(/<a[^>]*class="[^"]*link[^"]*"[^>]*>([\s\S]*?)<\/a>/i)?.[1] ||
+      sidebar.match(/<a[^>]*>([\s\S]*?)<\/a>/i)?.[1];
+    const codeRaw =
+      sidebar.match(/id="activity-name"[^>]*>([\s\S]*?)<\/span>/i)?.[1] ||
+      sidebar.match(/>(\d{2}\.\d{2}(?:\.\d{1,2})?)\s*</)?.[1];
+    const name = nameRaw ? stripTags(nameRaw) : "";
+    const code = codeRaw ? stripTags(codeRaw) : "";
+    if (name && code) return `${code} — ${name}`.slice(0, 300);
+    if (name) return name.slice(0, 300);
+    if (code) return code;
+  }
+
+  const row = html.match(
+    /id="activity"[\s\S]{0,1200}?<tr>\s*<td[^>]*>\s*([\d.]+)\s*<\/td>\s*<td[^>]*>([\s\S]*?)<\/td>/i
+  );
+  if (row) {
+    const code = stripTags(row[1]);
+    const name = stripTags(row[2].replace(/<span[\s\S]*$/i, ""));
+    if (name && code) return `${code} — ${name}`.slice(0, 300);
+  }
+  return undefined;
+}
+
+export function parseCheckoCompanyPage(
+  html: string,
+  path: string
+): CheckoCompany {
+  const ogrnFromPath = path.match(/-(\d{13})(?:\/|$)/)?.[1] ?? "";
+  const ogrn =
+    html.match(/id="copy-ogrn"[^>]*>\s*(\d{13})/i)?.[1] ||
+    html.match(/"propertyID":"ОГРН","value":"(\d{13})"/)?.[1] ||
+    html.match(/ОГРН[^0-9]{0,40}(\d{13})/i)?.[1] ||
+    ogrnFromPath;
+
+  const inn =
+    html.match(/id="copy-inn"[^>]*>\s*(\d{10,12})/i)?.[1] ||
+    html.match(/"taxID":"(\d{10,12})"/)?.[1] ||
+    html.match(/ИНН[^0-9]{0,40}(\d{10,12})/i)?.[1];
+
+  const shortNameRaw =
+    html.match(/id="cn"[^>]*>([\s\S]*?)<\/h1>/i)?.[1] ||
+    html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1];
+  const shortName = shortNameRaw ? stripTags(shortNameRaw) : undefined;
+
+  const fullName =
+    html.match(/"legalName":"([^"]+)"/)?.[1]?.replace(/\\"/g, '"') ||
+    shortName;
+
+  const founding = html.match(/"foundingDate":"(\d{4}-\d{2}-\d{2})"/)?.[1];
+  const regBlock =
+    html.match(/Дата регистрации[\s\S]{0,120}?(\d{1,2}\s+[а-яё]+\s+\d{4})/i)?.[1] ||
+    "";
+  const parsedRu = parseCheckoRuDate(regBlock || html);
+  const registrationDateIso = founding || parsedRu.iso;
+  const registrationDateRu =
+    parsedRu.ru ||
+    (registrationDateIso ? isoToRuDate(registrationDateIso) : undefined);
+
+  const contactSection =
+    html.match(
+      /(?:Телефон|Электронная почта)[\s\S]*?(?:Cоциальные сети|Социальные сети|Предложить исправление)/i
+    )?.[0] ||
+    html.match(/Электронная почта[\s\S]*?(?:Веб-сайт|Предложить исправление)/i)?.[0] ||
+    html.match(/(?:Телефон|Электронная почта)[\s\S]{0,1600}/i)?.[0] ||
+    "";
+
+  const emails: string[] = [];
+  const pushEmail = (raw: string) => {
+    const email = raw.trim().toLowerCase();
+    if (!email || /checko\.ru/i.test(email)) return;
+    if (!emails.includes(email)) emails.push(email);
+  };
+
+  const phones: string[] = [];
+  const pushPhone = (raw: string) => {
+    const normalized = normalizeRuPhone(raw);
+    if (!normalized) return;
+    const display = formatRuPhone(normalized);
+    if (!display || phones.includes(display)) return;
+    phones.push(display);
+  };
+
+  const mailRe = /mailto:([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})/gi;
+  let em: RegExpExecArray | null;
+  while ((em = mailRe.exec(contactSection))) pushEmail(em[1]);
+
+  // Иногда на карточке текст без mailto:
+  const textEmailRe =
+    /(?:Электронная почта|E-?mail|Email)[^A-Z0-9@]{0,80}([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})/gi;
+  while ((em = textEmailRe.exec(contactSection || html))) pushEmail(em[1]);
+
+  if (emails.length === 0) {
+    while ((em = mailRe.exec(html))) pushEmail(em[1]);
+  }
+  if (emails.length === 0) {
+    const bare = html.match(
+      />([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})</gi
+    );
+    for (const tag of bare || []) {
+      const m = tag.match(/([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})/i);
+      if (m) pushEmail(m[1]);
+    }
+  }
+
+  const telRe = /tel:(\+?[\d\-\s()]+)/gi;
+  while ((em = telRe.exec(contactSection || html))) pushPhone(em[1]);
+  const textPhoneRe =
+    /(?:Телефон|Номер телефона|Phone)[^0-9+]{0,40}(\+?[78][\d\-\s()]{9,18})/gi;
+  while ((em = textPhoneRe.exec(contactSection || html))) pushPhone(em[1]);
+  if (phones.length === 0) {
+    while ((em = telRe.exec(html))) pushPhone(em[1]);
+  }
+
+  return {
+    path,
+    url: `${CHECKO_BASE}${path}`,
+    ogrn,
+    inn,
+    shortName,
+    fullName,
+    registrationDateIso,
+    registrationDateRu,
+    email: emails[0],
+    emails,
+    phone: phones[0],
+    phones,
+    okved: parseCheckoOkved(html),
+  };
+}
+
+function htmlLooksLikeCheckoCaptcha(html: string): boolean {
+  return /подтвердите, что вы человек|большое количество запросов|smart-captcha/i.test(
+    html
+  );
+}
+
+function hashString(value: string): number {
+  let h = 0;
+  for (let i = 0; i < value.length; i++) {
+    h = (h * 31 + value.charCodeAt(i)) | 0;
+  }
+  return h === 0 ? 1 : h;
+}
+
+export function checkoCompanyToDeclaration(
+  company: CheckoCompany
+): FsaDeclaration {
+  const ogrnNum = Number(company.ogrn);
+  const id = Number.isFinite(ogrnNum)
+    ? ogrnNum
+    : Math.abs(hashString(company.ogrn || company.path));
+  const regRu =
+    company.registrationDateRu ||
+    (company.registrationDateIso
+      ? isoToRuDate(company.registrationDateIso)
+      : "");
+
+  const applicant: FsaApplicant = {
+    type: "ul",
+    ogrn: company.ogrn,
+    inn: company.inn,
+    shortName: company.shortName,
+    fullName: company.fullName || company.shortName,
+    email: company.email,
+    phone: company.phone,
+  };
+
+  return {
+    id,
+    number: company.ogrn || String(id),
+    registrationDate: regRu,
+    endDate: regRu,
+    status: "active",
+    applicant,
+    productName: company.okved || "Новая организация",
+    productGroup: company.okved,
+    registryUrl: company.url,
+  };
+}
+
+function listItemToCompany(item: CheckoListItem): CheckoCompany {
+  return {
+    path: item.path,
+    url: item.url,
+    ogrn: item.ogrn,
+    shortName: item.name,
+    fullName: item.name,
+    emails: [],
+    phones: [],
+  };
+}
+
+function buildFilterPayload(dateFrom: string, dateTo: string) {
+  // Формат как на checko.ru (update() в /search/advanced), не старый *_checkbox.
+  return {
+    entity: "organizations",
+    active: true,
+    activities: NEW_REG_CHECKO_ACTIVITY_IDS as unknown as string[],
+    locations: [],
+    search: "",
+    date_from: dateFrom,
+    date_to: dateTo,
+    smb: false,
+    smb_code: "0",
+    employee: false,
+    employee_min: "",
+    employee_max: "",
+    capital: false,
+    capital_min: "",
+    fs_2110: false,
+    fs_2110_min: "",
+    fs_2110_max: "",
+    fs_2400: false,
+    fs_2400_min: "",
+    fs_2400_max: "",
+    fs_1300: false,
+    fs_1300_min: "",
+    fs_1300_max: "",
+    tax_treatment: false,
+    tax_treatment_code: "1",
+    tax_amount: false,
+    tax_amount_min: "",
+    cn: false,
+    cncs_min: "",
+    cnsp_min: "",
+    licenses: false,
+    trademarks: false,
+    leasing: false,
+    phones: false,
+    emails: true,
+    websites: false,
+  };
+}
+
+async function passCheckoChallengeIfNeeded(
+  page: {
+    content: () => Promise<string>;
+    reload: (options?: {
+      waitUntil?: "domcontentloaded";
+      timeout?: number;
+    }) => Promise<unknown>;
+    locator: (selector: string) => {
+      first: () => {
+        click: (options?: { timeout?: number }) => Promise<unknown>;
+      };
+    };
+    frames: () => Array<{
+      locator: (selector: string) => {
+        first: () => {
+          click: (options?: { timeout?: number }) => Promise<unknown>;
+        };
+      };
+    }>;
+    waitForTimeout?: (ms: number) => Promise<void>;
+  },
+  headed: boolean
+): Promise<void> {
+  let html = await page.content();
+  if (!/подтвердите, что вы человек|большое количество запросов/i.test(html)) {
+    return;
+  }
+  if (headed) {
+    checkoDebug("[checko] Капча: ждём ручную проверку в окне…");
+    const deadline = Date.now() + 300_000;
+    while (Date.now() < deadline) {
+      await sleep(2000);
+      html = await page.content();
+      if (!/подтвердите, что вы человек|большое количество запросов/i.test(html)) {
+        return;
+      }
+    }
+    throw new Error("CHECKO_ACCESS_LIMITED");
+  }
+
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    await page
+      .locator('button:has-text("Подтвердить")')
+      .first()
+      .click({ timeout: 2500 })
+      .catch(() => undefined);
+    await page
+      .locator(".smart-captcha, [class*=SmartCaptcha], iframe")
+      .first()
+      .click({ timeout: 2500 })
+      .catch(() => undefined);
+    for (const frame of page.frames()) {
+      await frame
+        .locator(
+          'input[type="checkbox"], #js-button, .CheckboxCaptcha-Button, [role="checkbox"]'
+        )
+        .first()
+        .click({ timeout: 1500 })
+        .catch(() => undefined);
+    }
+    await sleep(2000 * attempt);
+    html = await page.content();
+    if (!/подтвердите, что вы человек|большое количество запросов/i.test(html)) {
+      return;
+    }
+    await page
+      .reload({ waitUntil: "domcontentloaded", timeout: 60_000 })
+      .catch(() => undefined);
+  }
+  throw new Error("CHECKO_ACCESS_LIMITED");
+}
+
+function resolveChromePath(browsersPath: string): string | undefined {
+  const candidates: string[] = [];
+  try {
+    for (const entry of fs.readdirSync(browsersPath, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name.startsWith("chromium-")) {
+        candidates.push(
+          path.join(browsersPath, entry.name, "chrome-win64", "chrome.exe"),
+          path.join(browsersPath, entry.name, "chrome-linux64", "chrome"),
+        );
+      }
+      if (entry.name.startsWith("chromium_headless_shell-")) {
+        candidates.push(
+          path.join(
+            browsersPath,
+            entry.name,
+            "chrome-headless-shell-win64",
+            "chrome-headless-shell.exe",
+          ),
+          path.join(
+            browsersPath,
+            entry.name,
+            "chrome-headless-shell-linux64",
+            "chrome-headless-shell",
+          ),
+        );
+      }
+    }
+  } catch {
+    /* empty / missing */
+  }
+  return candidates.find((p) => fs.existsSync(p));
+}
+
+// Playwright types через dynamic import часто ломают tsc — держим loosely.
+function resolveCheckoProxy(): string | undefined {
+  const explicit = process.env.OUTREACH_CHECKO_PROXY?.trim();
+  if (explicit) return explicit;
+  return getFsaProxy();
+}
+
+async function openCheckoContext(
+  headed: boolean,
+  profileSlot = 0
+): Promise<{
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  context: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  page: any;
+}> {
+  const browsersPath = ensurePlaywrightBrowsersEnv();
+  const { chromium } = await import("playwright");
+  const profileDir = checkoProfileDir(profileSlot);
+  fs.mkdirSync(profileDir, { recursive: true });
+  const executablePath = resolveChromePath(browsersPath);
+  if (!executablePath && !process.env.OUTREACH_CHECKO_CHANNEL?.trim()) {
+    throw new Error("Не найден браузер для загрузки с checko.");
+  }
+  const proxy = resolveCheckoProxy();
+  const context = await chromium.launchPersistentContext(profileDir, {
+    headless: !headed,
+    executablePath: process.env.OUTREACH_CHECKO_CHANNEL?.trim()
+      ? undefined
+      : executablePath,
+    channel: process.env.OUTREACH_CHECKO_CHANNEL?.trim() || undefined,
+    userAgent: USER_AGENT,
+    viewport: { width: 1365, height: 900 },
+    locale: "ru-RU",
+    ...(proxy ? { proxy: playwrightProxyOptions(proxy) } : {}),
+  });
+  const page = context.pages()[0] || (await context.newPage());
+  return { context, page };
+}
+
+/**
+ * Срочная фаза: только страницы списка (без карточек).
+ */
+export async function scanCheckoNewRegistrationsInProcess(
+  options: CheckoScanOptions = {}
+): Promise<CheckoScanResult> {
+  if (isCheckoBlocked()) {
+    throw new Error(getCheckoBlockReason() || "CHECKO_ACCESS_LIMITED");
+  }
+  return withCheckoProfileLock(
+    () => scanCheckoNewRegistrationsUnlocked(options),
+    { label: "scan", waitMs: 180_000 }
+  );
+}
+
+async function scanCheckoNewRegistrationsUnlocked(
+  options: CheckoScanOptions = {}
+): Promise<CheckoScanResult> {
+  const defaultRange = getNewRegistrationsRange();
+  const dateFrom =
+    options.dateFrom?.trim() || ruDateToIso(defaultRange.from);
+  const dateTo = options.dateTo?.trim() || ruDateToIso(defaultRange.to);
+  const listOnly = options.listOnly !== false;
+  const maxItems = Math.min(Math.max(options.maxItems ?? 100, 1), 1000);
+  const maxPages = Math.min(
+    Math.max(
+      options.maxPages ??
+        Number(
+          process.env.OUTREACH_CHECKO_FAST === "1"
+            ? process.env.OUTREACH_CHECKO_MAX_PAGES || 200
+            : process.env.OUTREACH_CHECKO_MAX_PAGES || 80
+        ),
+      1
+    ),
+    200
+  );
+  const delayMs = checkoListDelayMs(options.delayMs);
+  const startPage = Math.max(options.startPage ?? 1, 1);
+  const sortQuery = options.sortQuery?.trim() || "";
+  const skip = new Set(
+    [...(options.skipOgrns ?? [])].map((x) => String(x).trim()).filter(Boolean)
+  );
+  const headed =
+    peekOutreachConfigSync().headed ||
+    process.env.OUTREACH_CHECKO_HEADED === "1";
+
+  logCheckoScan("scan_start", {
+    dateFrom,
+    dateTo,
+    startPage,
+    maxItems,
+    maxPages,
+    skipCount: skip.size,
+    sortQuery: sortQuery || "(default)",
+    listOnly,
+    headed,
+    worker: process.env.OUTREACH_CHECKO_WORKER === "1",
+  });
+
+  const { context, page } = await openCheckoContext(headed);
+  const companies: CheckoCompany[] = [];
+  let pagesFetched = 0;
+  let pageNum = startPage;
+  let hasMore = true;
+  let totalOnSite: number | undefined;
+  let nextPage = startPage;
+
+  try {
+    await gotoCheckoPage(page, `${CHECKO_BASE}${CHECKO_ADVANCED_PATH}`);
+    await passCheckoChallengeIfNeeded(page, headed);
+
+    const payload = buildFilterPayload(dateFrom, dateTo);
+    const filterStatus = await page.evaluate(
+      async ({ body, base }: { body: unknown; base: string }) => {
+        const token =
+          document
+            .querySelector('meta[name="csrf-token"]')
+            ?.getAttribute("content") || "";
+        const res = await fetch(`${base}/local-storage/update/advanced-search`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-CSRF-TOKEN": token,
+            "X-Requested-With": "XMLHttpRequest",
+          },
+          body: `data=${encodeURIComponent(JSON.stringify(body))}`,
+          credentials: "same-origin",
+        });
+        return res.status;
+      },
+      { body: payload, base: CHECKO_BASE }
+    );
+    if (filterStatus >= 400) {
+      throw new Error(`Не удалось применить фильтр на checko (код ${filterStatus}).`);
+    }
+
+    await gotoCheckoPage(page, `${CHECKO_BASE}${CHECKO_ADVANCED_PATH}`);
+    await passCheckoChallengeIfNeeded(page, headed);
+
+    const emptyPagesStop = Math.min(
+      Math.max(
+        Number(process.env.OUTREACH_CHECKO_EMPTY_PAGES_STOP || 8),
+        2
+      ),
+      50
+    );
+    let consecutiveEmptyNewPages = 0;
+
+    while (companies.length < maxItems && pagesFetched < maxPages && hasMore) {
+      if (pagesFetched > 0 && delayMs) await sleep(humanPauseMs(delayMs));
+      const url = `${CHECKO_BASE}${buildCheckoAdvancedListUrl(pageNum, sortQuery)}`;
+      await gotoCheckoPage(page, url);
+      await passCheckoChallengeIfNeeded(page, headed);
+      pagesFetched += 1;
+
+      const html = await page.content();
+      const list = parseCheckoSearchPage(html, pageNum);
+      totalOnSite = list.total || totalOnSite;
+      options.onPage?.(list);
+
+      if (list.total === 0 && list.items.length === 0 && pagesFetched > 1) {
+        checkoDebugWarn(
+          `[checko] page ${pageNum}: пустой ответ (total=0), останавливаем проход`
+        );
+        hasMore = false;
+        break;
+      }
+
+      let pageNew = 0;
+      let pageSkip = 0;
+      for (const item of list.items) {
+        if (companies.length >= maxItems) break;
+        if (skip.has(item.ogrn)) {
+          pageSkip += 1;
+          continue;
+        }
+        skip.add(item.ogrn);
+        pageNew += 1;
+
+        let company = listItemToCompany(item);
+        if (!listOnly) {
+          if (delayMs) await sleep(humanPauseMs(delayMs));
+          await page.goto(item.url, {
+            waitUntil: "domcontentloaded",
+            timeout: 90_000,
+          });
+          await passCheckoChallengeIfNeeded(page, headed);
+          company = parseCheckoCompanyPage(await page.content(), item.path);
+        }
+
+        if (options.emailsOnly && !company.email) continue;
+        companies.push(company);
+        options.onCompany?.(company);
+      }
+
+      options.onPageProgress?.({
+        page: pageNum,
+        total: list.total,
+        listed: list.items.length,
+        newCount: pageNew,
+        skipCount: pageSkip,
+      });
+      checkoDebug(
+        `[checko] page ${pageNum}: +${pageNew} new, ${pageSkip} skip, total=${list.total}`
+      );
+
+      if (pageNew === 0) consecutiveEmptyNewPages += 1;
+      else consecutiveEmptyNewPages = 0;
+      if (consecutiveEmptyNewPages >= emptyPagesStop) {
+        checkoDebugWarn(
+          `[checko] ${consecutiveEmptyNewPages} страниц подряд без новых — стоп прохода`
+        );
+        hasMore = false;
+        break;
+      }
+
+      hasMore = list.hasMore && list.items.length > 0;
+      nextPage = hasMore ? pageNum + 1 : pageNum;
+      pageNum += 1;
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (/CHECKO_ACCESS_LIMITED|капч|большое количество|429/i.test(msg)) {
+      markCheckoBlocked(msg.slice(0, 120));
+    }
+    throw error;
+  } finally {
+    await context.close().catch(() => undefined);
+  }
+
+  const result = {
+    range: { from: isoToRuDate(dateFrom), to: isoToRuDate(dateTo) },
+    pagesFetched,
+    companies,
+    declarations: companies.map(checkoCompanyToDeclaration),
+    nextPage,
+    hasMore,
+    totalOnSite,
+  };
+  logCheckoScan("scan_done", {
+    dateFrom,
+    dateTo,
+    pagesFetched,
+    companies: companies.length,
+    totalOnSite: totalOnSite ?? null,
+    hasMore,
+    nextPage,
+  });
+  return result;
+}
+
+const CHECKO_SCAN_TIMEOUT_MS = Math.max(
+  Number(process.env.OUTREACH_CHECKO_SCAN_TIMEOUT_MS || 240_000),
+  60_000
+);
+
+export async function scanCheckoNewRegistrations(
+  options: CheckoScanOptions = {}
+): Promise<CheckoScanResult> {
+  const scanOpts = {
+    ...options,
+    listOnly: options.listOnly !== false,
+  };
+
+  if (
+    process.env.OUTREACH_CHECKO_WORKER === "1" ||
+    process.env.OUTREACH_CHECKO_INPROCESS === "1"
+  ) {
+    return scanCheckoNewRegistrationsInProcess(scanOpts);
+  }
+
+  const worker = path.join(
+    process.cwd(),
+    "scripts",
+    "outreach",
+    "scan-checko-worker.mts"
+  );
+  const tsxCli = path.join(
+    process.cwd(),
+    "node_modules",
+    "tsx",
+    "dist",
+    "cli.mjs"
+  );
+
+  // На проде без tsx/скрипта — in-process (Linux/pm2 это нормально).
+  if (!fs.existsSync(worker) || !fs.existsSync(tsxCli)) {
+    checkoDebugWarn(
+      "[checko] worker/tsx недоступны — сканируем in-process"
+    );
+    return scanCheckoNewRegistrationsInProcess(scanOpts);
+  }
+
+  const payload = JSON.stringify({
+    dateFrom: options.dateFrom,
+    dateTo: options.dateTo,
+    emailsOnly: false,
+    listOnly: options.listOnly !== false,
+    maxItems: options.maxItems,
+    maxPages: options.maxPages,
+    startPage: options.startPage,
+    skipOgrns: options.skipOgrns ? [...options.skipOgrns] : undefined,
+    sortQuery: options.sortQuery,
+    delayMs: options.delayMs,
+  });
+
+  try {
+    return await spawnCheckoScanWorker(tsxCli, worker, payload);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    // Windows EINVAL / missing binary — не роняем прод, пробуем in-process.
+    if (/EINVAL|ENOENT|spawn/i.test(msg)) {
+      checkoDebugWarn(`[checko] worker spawn failed (${msg}) — in-process`);
+      return scanCheckoNewRegistrationsInProcess(scanOpts);
+    }
+    throw error;
+  }
+}
+
+function spawnCheckoScanWorker(
+  tsxCli: string,
+  worker: string,
+  payload: string
+): Promise<CheckoScanResult> {
+  return new Promise((resolve, reject) => {
+    // node + tsx/cli: работает на Linux-проде и на Windows (без npx.cmd EINVAL).
+    const childEnv = {
+      ...process.env,
+      OUTREACH_CHECKO_WORKER: "1",
+      PLAYWRIGHT_BROWSERS_PATH: ensurePlaywrightBrowsersEnv(),
+    };
+    const child = spawn(process.execPath, [tsxCli, worker, payload], {
+      cwd: process.cwd(),
+      env: childEnv,
+      shell: false,
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(
+        new Error(
+          `checko scan timeout (${Math.round(CHECKO_SCAN_TIMEOUT_MS / 1000)}s)`
+        )
+      );
+    }, CHECKO_SCAN_TIMEOUT_MS);
+
+    child.stdout.on("data", (buf) => {
+      const text = String(buf);
+      stdout += text;
+      if (text.trim()) checkoDebug(`[checko-worker] ${text.trim()}`);
+    });
+    child.stderr.on("data", (buf) => {
+      stderr += String(buf);
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      const marker = "CHECKO_SCAN_RESULT=";
+      const line = stdout
+        .split(/\r?\n/)
+        .reverse()
+        .find((l) => l.includes(marker));
+      if (line) {
+        try {
+          const raw = line.slice(line.indexOf(marker) + marker.length);
+          const parsed = JSON.parse(raw) as
+            | CheckoScanResult
+            | { ok: false; error?: string };
+          if ("ok" in parsed && parsed.ok === false) {
+            logCheckoScan("worker_fail", { error: parsed.error || "checko worker failed" });
+            reject(new Error(parsed.error || "checko worker failed"));
+            return;
+          }
+          const scanResult = parsed as CheckoScanResult;
+          logCheckoScan("worker_done", {
+            exitCode: code,
+            pagesFetched: scanResult.pagesFetched,
+            companies: scanResult.companies?.length ?? 0,
+            totalOnSite: scanResult.totalOnSite ?? null,
+            hasMore: scanResult.hasMore,
+          });
+          resolve(scanResult);
+          return;
+        } catch (error) {
+          reject(
+            new Error(
+              `checko worker: bad JSON (${error instanceof Error ? error.message : error})`
+            )
+          );
+          return;
+        }
+      }
+      reject(
+        new Error(
+          `checko worker exit ${code}: ${(stderr || stdout).slice(0, 800) || "no output"}`
+        )
+      );
+    });
+  });
+}
+
+/**
+ * Фон: карточки → email в одной сессии браузера (не перезапускать Chrome на каждую).
+ */
+export type CheckoEnrichItemResult = {
+  url: string;
+  company?: CheckoCompany;
+  error?: string;
+  blocked?: boolean;
+};
+
+function toCompanyPath(registryUrlOrPath: string): string {
+  const pathOrUrl = registryUrlOrPath.trim();
+  if (pathOrUrl.startsWith("http")) return new URL(pathOrUrl).pathname;
+  if (pathOrUrl.startsWith("/")) return pathOrUrl;
+  return `/company/${pathOrUrl}`;
+}
+
+export function getCheckoEnrichDelayMs(): number {
+  const raw =
+    peekOutreachConfigSync().enrichDelayMs ??
+    Number(process.env.OUTREACH_CHECKO_ENRICH_DELAY_MS || 9000);
+  const min = process.env.OUTREACH_CHECKO_FAST === "1" ? 0 : 4000;
+  return Math.max(raw, min);
+}
+
+function getCheckoPostLoadDelayMs(): number {
+  const raw = Number(process.env.OUTREACH_CHECKO_POST_LOAD_MS ?? 1500);
+  return Math.max(raw, 0);
+}
+
+async function enrichCheckoUrlOnPage(
+  page: Parameters<typeof passCheckoChallengeIfNeeded>[0] & {
+    goto: (url: string, options?: object) => Promise<unknown>;
+  },
+  url: string,
+  headed: boolean
+): Promise<CheckoEnrichItemResult> {
+  const pauseBase = getCheckoEnrichDelayMs();
+  const postLoadPause = getCheckoPostLoadDelayMs();
+  await sleep(humanPauseMs(pauseBase));
+  const companyPath = toCompanyPath(url);
+  try {
+    await page.goto(`${CHECKO_BASE}${companyPath}`, {
+      waitUntil: "domcontentloaded",
+      timeout: 90_000,
+    });
+    await passCheckoChallengeIfNeeded(page, headed);
+    if (postLoadPause > 0) await sleep(humanPauseMs(postLoadPause));
+    const company = parseCheckoCompanyPage(await page.content(), companyPath);
+    checkoDebug(
+      `[checko-enrich] ${company.ogrn || companyPath} | ${company.shortName || "—"} | email=${company.email || "нет"} | phone=${company.phone || "нет"} | all=${company.emails.join(",") || "—"}`
+    );
+    return { url, company };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    const blocked =
+      /CHECKO_ACCESS_LIMITED|капч|большое количество|429/i.test(msg);
+    if (blocked) markCheckoBlocked(msg.slice(0, 120));
+    checkoDebugWarn(`[checko-enrich] FAIL ${companyPath}: ${msg}`);
+    return { url, error: msg, blocked };
+  }
+}
+
+async function enrichCheckoUrlsInSession(
+  urls: string[],
+  options?: { shouldAbort?: () => boolean; profileSlot?: number }
+): Promise<CheckoEnrichItemResult[]> {
+  const headed =
+    peekOutreachConfigSync().headed ||
+    process.env.OUTREACH_CHECKO_HEADED === "1";
+  const slot = options?.profileSlot ?? 0;
+  const { context, page } = await openCheckoContext(headed, slot);
+  const results: CheckoEnrichItemResult[] = [];
+  try {
+    for (let i = 0; i < urls.length; i++) {
+      const url = urls[i];
+      if (options?.shouldAbort?.()) {
+        for (let j = i; j < urls.length; j++) {
+          results.push({ url: urls[j], error: "aborted" });
+        }
+        break;
+      }
+      const result = await enrichCheckoUrlOnPage(page, url, headed);
+      results.push(result);
+      if (result.blocked) {
+        for (let j = i + 1; j < urls.length; j++) {
+          results.push({
+            url: urls[j],
+            error: "CHECKO_ACCESS_LIMITED",
+            blocked: true,
+          });
+        }
+        break;
+      }
+    }
+  } finally {
+    await context.close().catch(() => undefined);
+  }
+  return results;
+}
+
+export async function enrichCheckoCompanyEmails(
+  urls: string[],
+  options?: { shouldAbort?: () => boolean }
+): Promise<CheckoEnrichItemResult[]> {
+  if (urls.length === 0) return [];
+  if (isCheckoBlocked()) {
+    const reason = getCheckoBlockReason() || "CHECKO_ACCESS_LIMITED";
+    return urls.map((url) => ({ url, error: reason, blocked: true }));
+  }
+
+  const parallel = checkoEnrichParallel();
+  if (parallel <= 1) {
+    return withCheckoProfileLock(
+      () => enrichCheckoUrlsInSession(urls, { ...options, profileSlot: 0 }),
+      { label: "enrich", waitMs: 180_000, lockPath: checkoProfileLockPath(0) }
+    );
+  }
+
+  const results: CheckoEnrichItemResult[] = new Array(urls.length);
+  await Promise.all(
+    Array.from({ length: parallel }, (_, slot) =>
+      withCheckoProfileLock(
+        async () => {
+          const headed =
+        peekOutreachConfigSync().headed ||
+        process.env.OUTREACH_CHECKO_HEADED === "1";
+          const { context, page } = await openCheckoContext(headed, slot);
+          try {
+            for (let i = slot; i < urls.length; i += parallel) {
+              if (options?.shouldAbort?.()) {
+                results[i] = { url: urls[i], error: "aborted" };
+                continue;
+              }
+              results[i] = await enrichCheckoUrlOnPage(page, urls[i], headed);
+              if (results[i]?.blocked) break;
+            }
+          } finally {
+            await context.close().catch(() => undefined);
+          }
+        },
+        {
+          label: `enrich-${slot}`,
+          waitMs: 180_000,
+          lockPath: checkoProfileLockPath(slot),
+        }
+      )
+    )
+  );
+
+  return results.map(
+    (row, index) =>
+      row ?? {
+        url: urls[index],
+        error: "CHECKO_ACCESS_LIMITED",
+        blocked: true,
+      }
+  );
+}
