@@ -90,20 +90,13 @@ export async function previewOutreachTick(): Promise<OutreachTickPreview> {
   const { checkoProfileDir } = await import(
     "@/lib/outreach/checko-profile-path"
   );
-  const { playwrightBrowsersPath } = await import(
+  const { playwrightBrowsersInstalled, playwrightBrowsersPath } = await import(
     "@/lib/outreach/playwright-env"
   );
   const fs = await import("node:fs");
   const profileDir = checkoProfileDir(0);
   const browsersPath = playwrightBrowsersPath();
-  let browsersFound = false;
-  try {
-    browsersFound =
-      fs.existsSync(browsersPath) &&
-      fs.readdirSync(browsersPath).some((n) => n.startsWith("chromium"));
-  } catch {
-    browsersFound = false;
-  }
+  const browsersFound = playwrightBrowsersInstalled();
   const profileFound = fs.existsSync(profileDir);
 
   const sendLimit = Math.min(cfg.schedule.sendPerTick, cfg.sendBatchLimit);

@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import path from "path";
 import { checkoProfileDir } from "@/lib/outreach/checko-profile-path";
-import { playwrightBrowsersPath } from "@/lib/outreach/playwright-env";
+import {
+  playwrightBrowsersInstalled,
+  playwrightBrowsersPath,
+} from "@/lib/outreach/playwright-env";
 import { getMailConfigStatus } from "@/lib/mail-send";
 import {
   getOutreachConfig,
@@ -60,14 +63,7 @@ export async function getOutreachSettingsView(): Promise<OutreachSettingsView> {
   ]);
   const profileDir = checkoProfileDir(0);
   const browsersPath = playwrightBrowsersPath();
-  let browsersFound = false;
-  try {
-    browsersFound =
-      fs.existsSync(browsersPath) &&
-      fs.readdirSync(browsersPath).some((n) => n.startsWith("chromium"));
-  } catch {
-    browsersFound = false;
-  }
+  const browsersFound = playwrightBrowsersInstalled();
 
   const mail = getMailConfigStatus();
   const last = state.lastResult;

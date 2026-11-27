@@ -10,7 +10,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { formatRuPhone, normalizeRuPhone } from "@/lib/phone";
 import type { FsaApplicant, FsaDeclaration } from "./types";
-import { ensurePlaywrightBrowsersEnv } from "./playwright-env";
+import {
+  ensurePlaywrightBrowsersEnv,
+  resolvePlaywrightChromePath,
+} from "./playwright-env";
 export {
   NEW_REG_WINDOW_DAYS,
   getNewRegistrationsRange,
@@ -447,12 +450,6 @@ export function parseCheckoCompanyPage(
   };
 }
 
-function htmlLooksLikeCheckoCaptcha(html: string): boolean {
-  return /подтвердите, что вы человек|большое количество запросов|smart-captcha/i.test(
-    html
-  );
-}
-
 function hashString(value: string): number {
   let h = 0;
   for (let i = 0; i < value.length; i++) {
@@ -623,40 +620,6 @@ async function passCheckoChallengeIfNeeded(
   throw new Error("CHECKO_ACCESS_LIMITED");
 }
 
-function resolveChromePath(browsersPath: string): string | undefined {
-  const candidates: string[] = [];
-  try {
-    for (const entry of fs.readdirSync(browsersPath, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      if (entry.name.startsWith("chromium-")) {
-        candidates.push(
-          path.join(browsersPath, entry.name, "chrome-win64", "chrome.exe"),
-          path.join(browsersPath, entry.name, "chrome-linux64", "chrome"),
-        );
-      }
-      if (entry.name.startsWith("chromium_headless_shell-")) {
-        candidates.push(
-          path.join(
-            browsersPath,
-            entry.name,
-            "chrome-headless-shell-win64",
-            "chrome-headless-shell.exe",
-          ),
-          path.join(
-            browsersPath,
-            entry.name,
-            "chrome-headless-shell-linux64",
-            "chrome-headless-shell",
-          ),
-        );
-      }
-    }
-  } catch {
-    /* empty / missing */
-  }
-  return candidates.find((p) => fs.existsSync(p));
-}
-
 // Playwright types через dynamic import часто ломают tsc — держим loosely.
 function resolveCheckoProxy(): string | undefined {
   const explicit = process.env.OUTREACH_CHECKO_PROXY?.trim();
@@ -677,7 +640,7 @@ async function openCheckoContext(
   const { chromium } = await import("playwright");
   const profileDir = checkoProfileDir(profileSlot);
   fs.mkdirSync(profileDir, { recursive: true });
-  const executablePath = resolveChromePath(browsersPath);
+  const executablePath = resolvePlaywrightChromePath(browsersPath);
   if (!executablePath && !process.env.OUTREACH_CHECKO_CHANNEL?.trim()) {
     throw new Error("Не найден браузер для загрузки с checko.");
   }
