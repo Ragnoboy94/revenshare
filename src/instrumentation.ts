@@ -1,9 +1,11 @@
 export async function register() {
-  if (process.env.NEXT_RUNTIME === "edge") return;
+  // Node-only: edge must not analyze/bundle Checko/Playwright/fs.
+  if (process.env.NEXT_RUNTIME !== "nodejs") return;
   if (process.env.OUTREACH_SCHEDULER === "0") return;
 
-  const { ensureOutreachScheduler } = await import(
-    "@/lib/outreach-scheduler"
+  // webpackIgnore: keep this out of the Edge instrumentation graph.
+  const { registerNode } = await import(
+    /* webpackIgnore: true */ "./instrumentation.node"
   );
-  await ensureOutreachScheduler();
+  await registerNode();
 }
