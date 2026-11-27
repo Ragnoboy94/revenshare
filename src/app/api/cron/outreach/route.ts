@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
-import { runOutreachTick } from "@/lib/outreach-scheduler";
+import {
+  ensureOutreachScheduler,
+  runOutreachTick,
+} from "@/lib/outreach-scheduler";
 
 /**
  * Внешний cron: POST /api/cron/outreach
@@ -21,6 +24,7 @@ export async function POST(request: Request) {
   if (!authorized(request)) {
     return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
   }
+  await ensureOutreachScheduler();
   // Без force: если расписание выключено в UI — cron ничего не делает.
   const result = await runOutreachTick();
   return NextResponse.json({ ok: result.ok, result });

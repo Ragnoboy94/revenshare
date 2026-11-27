@@ -15,6 +15,7 @@ import {
   getOutreachJobStatus,
 } from "@/lib/outreach-job-status";
 import {
+  ensureOutreachScheduler,
   previewOutreachTick,
   runOutreachTick,
 } from "@/lib/outreach-scheduler";
@@ -106,6 +107,8 @@ export async function GET(request: Request, context: Ctx) {
   const { slug } = await context.params;
   const denied = await guard(slug);
   if (denied) return denied;
+
+  await ensureOutreachScheduler();
 
   const url = new URL(request.url);
   const page = Number(url.searchParams.get("page") || 1);
