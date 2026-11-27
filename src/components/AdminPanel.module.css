@@ -720,3 +720,42 @@
     max-width: 8rem;
   }
 }
+
+.chatThread {
+  display: grid;
+  gap: 0.65rem;
+  max-width: 42rem;
+}
+
+.chatUser,
+.chatBot {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+
+.chatUser {
+  border-left: 3px solid var(--accent);
+}
+
+.chatBot {
+  border-left: 3px solid var(--line);
+  background: var(--bg-elevated, #f4f8f8);
+}
+
+.chatRole {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.chatText {
+  margin: 0;
+  white-space: pre-wrap;
+  font-size: 0.92rem;
+  line-height: 1.45;
+}

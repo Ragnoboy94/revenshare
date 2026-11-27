@@ -6,6 +6,7 @@ import { Hero } from "@/components/Hero";
 import { HowItWorks } from "@/components/HowItWorks";
 import { LeadForm } from "@/components/LeadForm";
 import { ProblemSolution } from "@/components/ProblemSolution";
+import { SiteChatWidget } from "@/components/SiteChatWidget";
 import { SiteFooter } from "@/components/SiteFooter";
 import { SiteHeader } from "@/components/SiteHeader";
 import { TermsClear } from "@/components/TermsClear";
@@ -31,6 +32,7 @@ export default function HomePage() {
         <LeadForm />
       </main>
       <SiteFooter />
+      <SiteChatWidget />
     </>
   );
 }

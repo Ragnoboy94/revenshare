@@ -15,7 +15,28 @@ import { AdminOutreach } from "./AdminOutreach";
 import styles from "./AdminPanel.module.css";
 
 type DemoRow = DemoPublic;
-type SectionId = "leads" | "demos" | "boards" | "outreach";
+type SectionId = "leads" | "chats" | "demos" | "boards" | "outreach";
+
+type ChatSummary = {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  ip: string;
+  messageCount: number;
+  preview: string;
+};
+
+type ChatMessageRow = {
+  role: "user" | "assistant";
+  content: string;
+  at: string;
+  weak?: boolean;
+};
+
+type ChatSessionDetail = ChatSummary & {
+  messages: ChatMessageRow[];
+  weakStreak?: number;
+};
 
 type NavItem = {
   id: SectionId;
@@ -25,6 +46,7 @@ type NavItem = {
 /** Add sections here — sidebar stays flat and short. */
 const NAV: NavItem[] = [
   { id: "leads", label: "Заявки" },
+  { id: "chats", label: "Чаты" },
   { id: "demos", label: "Демо" },
   { id: "boards", label: "Доски" },
   { id: "outreach", label: "Рассылка" },
@@ -54,6 +76,7 @@ const DEMO_STATUS_LABEL: Record<DemoRow["status"], string> = {
 
 const SEARCH_PLACEHOLDER: Record<SectionId, string> = {
   leads: "Имя, телефон, ниша…",
+  chats: "Текст или IP…",
   demos: "Slug или название…",
   boards: "Проект или клиент…",
   outreach: "Компания, email, ОГРН…",
@@ -61,6 +84,7 @@ const SEARCH_PLACEHOLDER: Record<SectionId, string> = {
 
 const SECTION_TITLE: Record<SectionId, string> = {
   leads: "Заявки",
+  chats: "Чаты",
   demos: "Демо",
   boards: "Доски",
   outreach: "Рассылка",
@@ -101,6 +125,9 @@ export function AdminPanel({
 }: Props) {
   const [authed, setAuthed] = useState(initialAuthed);
   const [leads, setLeads] = useState(initialLeads);
+  const [chats, setChats] = useState<ChatSummary[]>([]);
+  const [openChat, setOpenChat] = useState<ChatSessionDetail | null>(null);
+  const [chatBusy, setChatBusy] = useState(false);
   const [demos, setDemos] = useState(initialDemos);
   const [boards, setBoards] = useState(initialBoards);
   const [password, setPassword] = useState("");
@@ -147,8 +174,16 @@ export function AdminPanel({
     setSection(id);
     setQuery("");
     setMenuOpen(false);
+    if (id !== "chats") setOpenChat(null);
+    if (id === "chats") void refreshChats();
     window.history.replaceState(null, "", `#${id}`);
   }
+
+  useEffect(() => {
+    if (authed) void refreshChats();
+    // только при входе / первой загрузке
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authed]);
 
   const counts = useMemo(
     () => ({
@@ -189,9 +224,38 @@ export function AdminPanel({
 
   function navBadge(id: SectionId): number {
     if (id === "leads") return counts.new > 0 ? counts.new : counts.all;
+    if (id === "chats") return chats.length;
     if (id === "boards") return counts.openWishes > 0 ? counts.openWishes : counts.boards;
     if (id === "outreach") return 0;
     return demos.length;
+  }
+
+  const visibleChats = useMemo(() => {
+    const q = query.trim();
+    return chats.filter((chat) =>
+      matchesQuery(`${chat.preview} ${chat.ip} ${chat.id}`, q),
+    );
+  }, [chats, query]);
+
+  async function refreshChats() {
+    try {
+      const res = await fetch(`${apiBase}/chats`);
+      const json = await readJson<{ ok?: boolean; sessions?: ChatSummary[] }>(res);
+      if (res.ok && json?.sessions) setChats(json.sessions);
+    } catch {
+      /* keep previous */
+    }
+  }
+
+  async function openChatSession(id: string) {
+    setChatBusy(true);
+    try {
+      const res = await fetch(`${apiBase}/chats?id=${encodeURIComponent(id)}`);
+      const json = await readJson<{ ok?: boolean; session?: ChatSessionDetail }>(res);
+      if (res.ok && json?.session) setOpenChat(json.session);
+    } finally {
+      setChatBusy(false);
+    }
   }
 
   async function readJson<T>(res: Response): Promise<T | null> {
@@ -244,6 +308,7 @@ export function AdminPanel({
       setLeads(listJson?.leads ?? []);
       await refreshDemos();
       await refreshBoards();
+      await refreshChats();
       setAuthed(true);
       setPassword("");
     } catch (err) {
@@ -257,6 +322,8 @@ export function AdminPanel({
     await fetch(`${apiBase}/logout`, { method: "POST" });
     setAuthed(false);
     setLeads([]);
+    setChats([]);
+    setOpenChat(null);
     setDemos([]);
     setBoards([]);
     setMenuOpen(false);
@@ -476,14 +543,21 @@ export function AdminPanel({
             <span className={styles.meta}>
               {section === "leads"
                 ? `${visibleLeads.length} из ${leads.length}`
-                : section === "demos"
-                  ? `${counts.demosRunning} online · ${visibleDemos.length}`
-                  : section === "boards"
-                    ? `${counts.openWishes} пожеланий · ${boards.length}`
-                    : "Checko → email → письмо"}
+                : section === "chats"
+                  ? `${visibleChats.length} из ${chats.length}`
+                  : section === "demos"
+                    ? `${counts.demosRunning} online · ${visibleDemos.length}`
+                    : section === "boards"
+                      ? `${counts.openWishes} пожеланий · ${boards.length}`
+                      : "Checko → email → письмо"}
             </span>
             {section === "demos" ? (
               <button type="button" className={styles.btn} onClick={() => refreshDemos()}>
+                Обновить
+              </button>
+            ) : null}
+            {section === "chats" ? (
+              <button type="button" className={styles.btn} onClick={() => refreshChats()}>
                 Обновить
               </button>
             ) : null}
@@ -553,6 +627,89 @@ export function AdminPanel({
                             ),
                           )}
                         </select>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )
+          ) : null}
+
+          {section === "chats" ? (
+            openChat ? (
+              <div>
+                <div className={styles.actions} style={{ marginBottom: "0.75rem" }}>
+                  <button
+                    type="button"
+                    className={styles.btn}
+                    onClick={() => setOpenChat(null)}
+                  >
+                    ← К списку
+                  </button>
+                  <span className={styles.meta}>
+                    {openChat.ip} · {openChat.messages.length} сообщ. ·{" "}
+                    {formatDate(openChat.updatedAt)}
+                  </span>
+                </div>
+                <div className={styles.chatThread}>
+                  {openChat.messages.map((m, i) => (
+                    <div
+                      key={`${m.at}-${i}`}
+                      className={
+                        m.role === "user" ? styles.chatUser : styles.chatBot
+                      }
+                    >
+                      <span className={styles.chatRole}>
+                        {m.role === "user" ? "Посетитель" : "Бот"}
+                        {m.weak ? " · слабый ответ" : ""}
+                      </span>
+                      <p className={styles.chatText}>{m.content}</p>
+                      <time className={styles.faint} dateTime={m.at}>
+                        {formatDate(m.at)}
+                      </time>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : visibleChats.length === 0 ? (
+              <p className={styles.empty}>
+                {chats.length === 0 ? "Чатов пока нет" : "Ничего не найдено"}
+              </p>
+            ) : (
+              <table className={styles.table}>
+                <thead>
+                  <tr>
+                    <th className={styles.colWhen}>Когда</th>
+                    <th>Превью</th>
+                    <th>IP</th>
+                    <th className={styles.colStatus}>Сообщ.</th>
+                    <th className={styles.right}> </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleChats.map((chat) => (
+                    <tr key={chat.id}>
+                      <td className={styles.faint}>
+                        <time dateTime={chat.updatedAt}>
+                          {formatDate(chat.updatedAt)}
+                        </time>
+                      </td>
+                      <td>
+                        <span className={styles.strong} title={chat.preview}>
+                          {chat.preview}
+                        </span>
+                      </td>
+                      <td className={styles.mono}>{chat.ip}</td>
+                      <td className={styles.muted}>{chat.messageCount}</td>
+                      <td className={styles.right}>
+                        <button
+                          type="button"
+                          className={styles.btn}
+                          disabled={chatBusy}
+                          onClick={() => openChatSession(chat.id)}
+                        >
+                          Открыть
+                        </button>
                       </td>
                     </tr>
                   ))}
