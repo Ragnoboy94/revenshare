@@ -637,8 +637,8 @@ export function AdminPanel({
 
           {section === "chats" ? (
             openChat ? (
-              <div>
-                <div className={styles.actions} style={{ marginBottom: "0.75rem" }}>
+              <div className={styles.chatView}>
+                <div className={styles.chatViewBar}>
                   <button
                     type="button"
                     className={styles.btn}
@@ -650,13 +650,18 @@ export function AdminPanel({
                     {openChat.ip} · {openChat.messages.length} сообщ. ·{" "}
                     {formatDate(openChat.updatedAt)}
                   </span>
+                  <span className={styles.mono} title={openChat.id}>
+                    {openChat.id.slice(0, 8)}…
+                  </span>
                 </div>
                 <div className={styles.chatThread}>
                   {openChat.messages.map((m, i) => (
                     <div
                       key={`${m.at}-${i}`}
                       className={
-                        m.role === "user" ? styles.chatUser : styles.chatBot
+                        m.role === "user"
+                          ? `${styles.chatBubble} ${styles.chatUser}`
+                          : `${styles.chatBubble} ${styles.chatBot}`
                       }
                     >
                       <span className={styles.chatRole}>
@@ -688,7 +693,14 @@ export function AdminPanel({
                 </thead>
                 <tbody>
                   {visibleChats.map((chat) => (
-                    <tr key={chat.id}>
+                    <tr
+                      key={chat.id}
+                      className={styles.chatRow}
+                      title="Двойной клик — открыть переписку"
+                      onDoubleClick={() => {
+                        if (!chatBusy) void openChatSession(chat.id);
+                      }}
+                    >
                       <td className={styles.faint}>
                         <time dateTime={chat.updatedAt}>
                           {formatDate(chat.updatedAt)}

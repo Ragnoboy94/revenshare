@@ -89,6 +89,7 @@ async function snapshot(extra?: {
     contactIndex: allContacts.map((c) => ({
       id: c.id,
       email: c.email,
+      emails: c.emails ?? [],
       status: c.status,
       shortName: c.shortName,
       name: c.name,

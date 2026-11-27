@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { contactEmailList } from "@/lib/outreach-emails";
 import type {
   OutreachContact,
   OutreachContactFilter,
@@ -93,10 +94,26 @@ type JobStatus = {
 type ContactIndexItem = {
   id: string;
   email?: string;
+  emails?: string[];
   status: OutreachContact["status"];
   shortName?: string;
   name: string;
 };
+
+function emailsOf(c: Pick<OutreachContact, "email" | "emails"> | ContactIndexItem): string[] {
+  return contactEmailList({
+    email: c.email,
+    emails: "emails" in c && Array.isArray(c.emails) ? c.emails : [],
+  });
+}
+
+function allEmailsUnsubscribed(
+  emails: string[],
+  unsub: Set<string>,
+): boolean {
+  if (emails.length === 0) return true;
+  return emails.every((e) => unsub.has(e.toLowerCase()));
+}
 
 type Letter = { subject: string; text: string; html?: string };
 
@@ -277,8 +294,10 @@ export function AdminOutreach({ apiBase }: Props) {
     const byId = new Map(contactIndex.map((c) => [c.id, c]));
     return selectedIds.filter((id) => {
       const c = byId.get(id);
-      if (!c?.email) return false;
-      if (unsubEmails.has(c.email.toLowerCase())) return false;
+      if (!c) return false;
+      const list = emailsOf(c);
+      if (list.length === 0) return false;
+      if (allEmailsUnsubscribed(list, unsubEmails)) return false;
       return true;
     });
   }, [selectedIds, contactIndex, unsubEmails]);
@@ -644,8 +663,9 @@ export function AdminOutreach({ apiBase }: Props) {
   function toggleAllPage(on: boolean) {
     const next = { ...selected };
     for (const c of contacts) {
-      if (!c.email) continue;
-      if (unsubEmails.has(c.email.toLowerCase())) continue;
+      const list = emailsOf(c);
+      if (list.length === 0) continue;
+      if (allEmailsUnsubscribed(list, unsubEmails)) continue;
       next[c.id] = on;
     }
     setSelected(next);
@@ -705,8 +725,9 @@ export function AdminOutreach({ apiBase }: Props) {
       .map((id) => byId.get(id))
       .filter((c): c is ContactIndexItem => {
         if (!c) return false;
-        if (!c.email) return true;
-        if (unsubEmails.has(c.email.toLowerCase())) return true;
+        const list = emailsOf(c);
+        if (list.length === 0) return true;
+        if (allEmailsUnsubscribed(list, unsubEmails)) return true;
         return false;
       });
   }, [selectedIds, contactIndex, unsubEmails]);
@@ -929,19 +950,21 @@ export function AdminOutreach({ apiBase }: Props) {
                               type="checkbox"
                               aria-label="Выбрать все на странице"
                               checked={
-                                contacts.filter(
-                                  (c) =>
-                                    c.email &&
-                                    !unsubEmails.has(c.email.toLowerCase()),
-                                ).length > 0 &&
+                                contacts.filter((c) => {
+                                  const list = emailsOf(c);
+                                  return (
+                                    list.length > 0 &&
+                                    !allEmailsUnsubscribed(list, unsubEmails)
+                                  );
+                                }).length > 0 &&
                                 contacts
-                                  .filter(
-                                    (c) =>
-                                      c.email &&
-                                      !unsubEmails.has(
-                                        c.email.toLowerCase(),
-                                      ),
-                                  )
+                                  .filter((c) => {
+                                    const list = emailsOf(c);
+                                    return (
+                                      list.length > 0 &&
+                                      !allEmailsUnsubscribed(list, unsubEmails)
+                                    );
+                                  })
                                   .every((c) => selected[c.id])
                               }
                               onChange={(e) =>
@@ -958,9 +981,10 @@ export function AdminOutreach({ apiBase }: Props) {
                       </thead>
                       <tbody>
                         {contacts.map((c) => {
-                          const unsubbed = Boolean(
-                            c.email &&
-                              unsubEmails.has(c.email.toLowerCase()),
+                          const mailList = emailsOf(c);
+                          const unsubbed = allEmailsUnsubscribed(
+                            mailList,
+                            unsubEmails,
                           );
                           const st = STATUS_UI[c.status];
                           return (
@@ -968,7 +992,7 @@ export function AdminOutreach({ apiBase }: Props) {
                               <td className={styles.colCheck}>
                                 <input
                                   type="checkbox"
-                                  disabled={!c.email || unsubbed}
+                                  disabled={mailList.length === 0 || unsubbed}
                                   checked={
                                     Boolean(selected[c.id]) && !unsubbed
                                   }
@@ -993,13 +1017,24 @@ export function AdminOutreach({ apiBase }: Props) {
                                 </div>
                               </td>
                               <td className={styles.emailCell}>
-                                {c.email ? (
-                                  <a
-                                    className={styles.link}
-                                    href={`mailto:${c.email}`}
-                                  >
-                                    {c.email}
-                                  </a>
+                                {mailList.length > 0 ? (
+                                  <div className={styles.emailStack}>
+                                    {mailList.map((email) => (
+                                      <a
+                                        key={email}
+                                        className={styles.link}
+                                        href={`mailto:${email}`}
+                                      >
+                                        {email}
+                                        {unsubEmails.has(email) ? (
+                                          <span className={styles.companyMeta}>
+                                            {" "}
+                                            · отписка
+                                          </span>
+                                        ) : null}
+                                      </a>
+                                    ))}
+                                  </div>
                                 ) : (
                                   <span className={styles.companyMeta}>
                                     {c.status === "no_email"
@@ -1009,7 +1044,7 @@ export function AdminOutreach({ apiBase }: Props) {
                                 )}
                                 {unsubbed ? (
                                   <div className={styles.companyMeta}>
-                                    отписка
+                                    все адреса в отписке
                                   </div>
                                 ) : null}
                                 {c.status === "failed" && c.lastError ? (
@@ -1049,14 +1084,14 @@ export function AdminOutreach({ apiBase }: Props) {
                                       ↗
                                     </a>
                                   ) : null}
-                                  {c.email ? (
+                                  {mailList.length > 0 ? (
                                     <button
                                       type="button"
                                       className={styles.iconBtn}
                                       title="Копировать email"
                                       onClick={() =>
                                         void navigator.clipboard.writeText(
-                                          c.email!,
+                                          mailList.join(", "),
                                         )
                                       }
                                     >
@@ -1074,15 +1109,17 @@ export function AdminOutreach({ apiBase }: Props) {
 
                   <div className={styles.cardsMobile}>
                     {contacts.map((c) => {
-                      const unsubbed = Boolean(
-                        c.email && unsubEmails.has(c.email.toLowerCase()),
+                      const mailList = emailsOf(c);
+                      const unsubbed = allEmailsUnsubscribed(
+                        mailList,
+                        unsubEmails,
                       );
                       const st = STATUS_UI[c.status];
                       return (
                         <div key={c.id} className={styles.contactCard}>
                           <input
                             type="checkbox"
-                            disabled={!c.email || unsubbed}
+                            disabled={mailList.length === 0 || unsubbed}
                             checked={Boolean(selected[c.id]) && !unsubbed}
                             onChange={(e) =>
                               setSelected((prev) => ({
@@ -1096,7 +1133,9 @@ export function AdminOutreach({ apiBase }: Props) {
                               {c.shortName || c.name}
                             </span>
                             <span className={styles.companyMeta}>
-                              {c.email || "без email"}
+                              {mailList.length > 0
+                                ? mailList.join(", ")
+                                : "без email"}
                             </span>
                             <span
                               className={`${styles.badge} ${st.badge}`}
@@ -1274,7 +1313,9 @@ export function AdminOutreach({ apiBase }: Props) {
                                 {c.shortName || c.name}
                               </span>
                               <span className={styles.companyMeta}>
-                                {c.email}
+                                {emailsOf(c)
+                                  .filter((e) => !unsubEmails.has(e))
+                                  .join(", ") || c.email}
                               </span>
                             </div>
                             <button

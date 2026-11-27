@@ -403,6 +403,11 @@
   white-space: nowrap;
 }
 
+.emailStack {
+  display: grid;
+  gap: 0.2rem;
+}
+
 .emailCell {
   overflow: hidden;
   text-overflow: ellipsis;

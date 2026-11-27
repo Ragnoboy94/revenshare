@@ -1,12 +1,16 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   CARD_STATUS_LABEL,
   CARD_STATUSES,
   type CardStatus,
 } from "@/lib/boards-shared";
 import styles from "./ClientBoard.module.css";
+
+function ackStorageKey(token: string): string {
+  return `rs-c-ack:${token}`;
+}
 
 export type ClientCard = {
   id: string;
@@ -45,6 +49,29 @@ export function ClientBoard({ token, initialBoard }: Props) {
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
   const [busy, setBusy] = useState(false);
+  /** loading → open (нужно подтверждение) → done */
+  const [gate, setGate] = useState<"loading" | "open" | "done">("loading");
+
+  useEffect(() => {
+    try {
+      setGate(
+        window.localStorage.getItem(ackStorageKey(token)) === "1"
+          ? "done"
+          : "open",
+      );
+    } catch {
+      setGate("open");
+    }
+  }, [token]);
+
+  function confirmGate() {
+    try {
+      window.localStorage.setItem(ackStorageKey(token), "1");
+    } catch {
+      /* private mode — всё равно пускаем в этой сессии */
+    }
+    setGate("done");
+  }
 
   const columns = useMemo(
     () =>
@@ -91,8 +118,56 @@ export function ClientBoard({ token, initialBoard }: Props) {
     }
   }
 
+  const locked = gate !== "done";
+
   return (
     <div className={styles.shell}>
+      {gate === "open" ? (
+        <div className={styles.gate} role="dialog" aria-modal="true" aria-labelledby="gate-title">
+          <div className={styles.gateCard}>
+            <p className={styles.gateBrand}>RevenShare</p>
+            <h2 id="gate-title" className={styles.gateTitle}>
+              Согласие на использование доски
+            </h2>
+            <p className={styles.gateLead}>
+              Доступ к доске предоставляется для согласования правок по проекту с
+              оператором RevenShare (ИП Махнев С. А.). Продолжая, вы подтверждаете:
+            </p>
+            <ul className={styles.gateList}>
+              <li>
+                Согласие на обработку персональных данных, которые вы указываете в
+                карточках и сообщениях, в соответствии с{" "}
+                <a href="/privacy" target="_blank" rel="noopener noreferrer">
+                  политикой обработки персональных данных
+                </a>
+                .
+              </li>
+              <li>
+                Материалы на доске используются для исполнения работ / обсуждения
+                проекта и не являются публичной офертой и не заменяют договор, если он
+                заключён отдельно.
+              </li>
+              <li>
+                Вы несёте ответственность за сохранность ссылки: передача третьим лицам
+                означает доступ к содержанию доски от вашего имени.
+              </li>
+              <li>
+                Запрещено размещать незаконный контент, чужие персональные данные без
+                оснований и сведения, не относящиеся к проекту.
+              </li>
+            </ul>
+            <button type="button" className={styles.gateBtn} onClick={confirmGate}>
+              Согласен — открыть доску
+            </button>
+            <p className={styles.gateFine}>
+              Нажимая кнопку, вы даёте согласие на условиях выше. Отозвать согласие на
+              обработку ПДн можно письмом на info@revenshare.ru.
+            </p>
+          </div>
+        </div>
+      ) : null}
+
+      <div aria-hidden={locked || undefined}>
       <header className={styles.topbar}>
         <div className={styles.topbarLeft}>
           <p className={styles.brand}>RevenShare</p>
@@ -110,6 +185,7 @@ export function ClientBoard({ token, initialBoard }: Props) {
           <button
             type="button"
             className={styles.addBtn}
+            disabled={locked}
             onClick={() => {
               setComposeOpen((v) => !v);
               setOk("");
@@ -121,7 +197,7 @@ export function ClientBoard({ token, initialBoard }: Props) {
         </div>
       </header>
 
-      {composeOpen ? (
+      {composeOpen && !locked ? (
         <section className={styles.compose} aria-labelledby="wish-title">
           <h2 id="wish-title" className={styles.composeTitle}>
             Что нужно сделать
@@ -206,6 +282,7 @@ export function ClientBoard({ token, initialBoard }: Props) {
           </div>
         ))}
       </section>
+      </div>
     </div>
   );
 }

@@ -1,6 +1,9 @@
 import { randomUUID } from "crypto";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
+import { contactEmailList } from "@/lib/outreach-emails";
+
+export { contactEmailList } from "@/lib/outreach-emails";
 
 export type OutreachContactStatus =
   | "pending_enrich"
@@ -102,7 +105,8 @@ export async function listOutreachContacts(): Promise<OutreachContact[]> {
 
 function matchContactQuery(c: OutreachContact, q: string): boolean {
   if (!q) return true;
-  return `${c.name} ${c.shortName ?? ""} ${c.email ?? ""} ${c.ogrn} ${c.inn ?? ""}`
+  const emails = contactEmailList(c).join(" ");
+  return `${c.name} ${c.shortName ?? ""} ${c.email ?? ""} ${emails} ${c.ogrn} ${c.inn ?? ""}`
     .toLowerCase()
     .includes(q);
 }
@@ -113,9 +117,9 @@ function matchContactFilter(
 ): boolean {
   switch (filter) {
     case "email":
-      return Boolean(c.email);
+      return contactEmailList(c).length > 0;
     case "no_email":
-      return !c.email || c.status === "no_email";
+      return contactEmailList(c).length === 0 || c.status === "no_email";
     case "pending":
       return c.status === "pending_enrich";
     case "sent":

@@ -11,10 +11,6 @@ const ALLOWED_KNOWLEDGE = [
 export const MAX_MESSAGE_CHARS = 300;
 const MAX_HISTORY = 6;
 const CACHE_MS = 15_000;
-export const WEAK_STREAK_LIMIT = 5;
-export const CHAT_LEAD_NUDGE =
-  "Похоже, по этому разговору удобнее перейти к заявке. Оставьте запрос через форму «Обсудить проект» на сайте или напишите на info@revenshare.ru.";
-
 type ChatTurn = { role: "user" | "assistant"; content: string };
 
 type KnowledgeChunk = {
@@ -108,7 +104,30 @@ const STOP = new Set([
 const FALLBACK =
   "Не хочу придумывать ответ вне проверенных условий. Кратко: без предоплаты за разработку, демо до договора, 10% с заявок с сайта. Уточните вопрос или оставьте заявку через форму «Обсудить проект» — либо напишите на info@revenshare.ru.";
 
+const GREETING_REPLY =
+  "Здравствуйте! Чем могу помочь — условия, демостенд, 10% с заявок или подойдёт ли модель вашему бизнесу?";
+
+const GREETING_AGAIN =
+  "Ещё раз здравствуйте. Напишите, пожалуйста, конкретный вопрос по условиям — так смогу ответить по делу.";
+
+const IDENTITY_REPLY =
+  "Да, я ИИ-помощник RevenShare, не живой человек. Скрывать нечего — могу быстро разложить условия. Что хотите узнать?";
+
 let cachedChunks: { at: number; chunks: KnowledgeChunk[] } | null = null;
+
+/** Только приветствие без вопроса. */
+export function isGreetingOnly(text: string): boolean {
+  const t = text
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/[!?.,…🙂😊😉]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!t || t.length > 40) return false;
+  return /^(привет|здрасте|здравствуй(те)?|добрый\s+(день|вечер|утро)|доброго\s+(дня|вечера|утра)|хай|хелло|hello|hi|hey|йоу|салют)$/i.test(
+    t,
+  );
+}
 
 async function readMd(name: string): Promise<string> {
   return (await fs.readFile(path.join(KNOWLEDGE_DIR, name), "utf8")).trim();
@@ -228,10 +247,10 @@ async function loadChunks(): Promise<KnowledgeChunk[]> {
   return chunks;
 }
 
-/** Вопрос «ты бот / человек / реальный?» — не путать с «нужен живой человек». */
-function isAiIdentityQuestion(q: string): boolean {
+/** Вопрос «ты бот / живой / человек / реальный?» — не путать с «нужен живой человек». */
+export function isAiIdentityQuestion(q: string): boolean {
   const asksIdentity =
-    /(ты|вы|это)\s+(бот|ии|нейросет)|бот\s*\?|(реальн\w*|живой)\s+человек|ты\s+человек|вы\s+человек|это\s+человек/i.test(
+    /(ты|вы|это)\s+(бот|ии|нейросет|живой|жива|реален|реальная)|бот\s*\?|(реальн\w*|живой)\s+человек|ты\s+человек|вы\s+человек|это\s+человек|ты\s+живой|вы\s+живой/i.test(
       q,
     );
   const wantsHuman =
@@ -334,6 +353,21 @@ export type LocalAnswer = { reply: string; weak: boolean };
 /** Локальный ответчик: только md-база, без внешних API и ключей. */
 export async function answerLocally(messages: ChatTurn[]): Promise<LocalAnswer> {
   const last = messages[messages.length - 1]?.content ?? "";
+
+  if (isGreetingOnly(last)) {
+    const greetingCount = messages.filter((m) => m.role === "user" && isGreetingOnly(m.content)).length;
+    if (greetingCount <= 1) {
+      // первый привет — вежливо, без «слабого» штрафа
+      return { reply: GREETING_REPLY, weak: false };
+    }
+    // повторный привет без вопроса — уже можно мягко направить
+    return { reply: GREETING_AGAIN, weak: true };
+  }
+
+  if (isAiIdentityQuestion(last)) {
+    return { reply: IDENTITY_REPLY, weak: false };
+  }
+
   const query = tokenSet(last);
   const chunks = await loadChunks();
 
